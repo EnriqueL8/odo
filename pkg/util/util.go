@@ -1,7 +1,9 @@
 package util
 
 import (
+	"archive/zip"
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -22,6 +25,8 @@ import (
 
 	"github.com/gobwas/glob"
 	"github.com/golang/glog"
+	"github.com/google/go-github/github"
+	"github.com/openshift/odo/pkg/log"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -717,6 +722,160 @@ func FilterIgnores(filesChanged, filesDeleted, absIgnoreRules []string) (filesCh
 	return filesChangedFiltered, filesDeletedFiltered
 }
 
+// DownloadFileInMemory uses the url to download the file and return the contents
+func DownloadFileInMemory(url string) ([]byte, error) {
+	var content []byte
+
+	// Get the data
+	var httpClient = &http.Client{Timeout: HTTPRequestTimeout}
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return content, err
+	}
+	defer resp.Body.Close()
+
+	// Read the body e
+	_, err = io.ReadFull(resp.Body, content)
+	if err != nil {
+		return content, err
+	}
+
+	return content, nil
+}
+
+// DownloadFromRepoURL downloads a repo from a URL to a destination
+func GetGitHubZipURL(repoURL string) (string, error) {
+	var url string
+
+	// check if github url is ssh
+	if strings.HasPrefix(repoURL, "git@") {
+		//TODO: Convert url
+	}
+
+	// expecting string in format 'https://github.com/<owner>/<repo>'
+	// TODO: Could you have http?
+	if strings.HasPrefix(repoURL, "https://") {
+		repoURL = strings.TrimPrefix(repoURL, "https://")
+	}
+
+	repoArray := strings.Split(repoURL, "/")
+	if len(repoArray) < 2 {
+		return url, errors.New("Invalid GitHub URL: Could not extract owner and repo, expecting 'https://github.com/<owner>/<repo>'.")
+	}
+
+	owner := repoArray[1]
+	repo := repoArray[2]
+	if strings.HasSuffix(repo, ".git") {
+		repo = strings.TrimSuffix(repo, ".git")
+	}
+
+	// TODO: pass branch or tag from devfile
+	branch := "master"
+
+	client := github.NewClient(nil)
+
+	opt := &github.RepositoryContentGetOptions{Ref: branch}
+
+	URL, response, err := client.Repositories.GetArchiveLink(context.Background(), owner, repo, "zipball", opt, true)
+	if err != nil {
+		log.Info("response: ", response)
+		return url, err
+	}
+	url = URL.String()
+	return url, nil
+}
+
+// DownloadAndExtractZip downloads a zip file from a URL
+// and extracts it to a destination
+func DownloadAndExtractZip(zipURL string, destination string) error {
+	time := time.Now().Format(time.RFC3339)
+	time = strings.Replace(time, ":", "-", -1) // ":" is illegal char in windows
+	pathToTempZipFile := path.Join(os.TempDir(), "_"+time+".zip")
+	// TODO: verify zip is actually a zip url
+
+	defer {
+		// TODO understand this
+		err = DeletePath(pathToTempZipFile)
+		if err != nil {
+			return err
+		}
+	}
+
+	err := DownloadFile(zipURL, pathToTempZipFile)
+	if err != nil {
+		return err
+	}
+
+	_, err = Unzip(pathToTempZipFile, destination)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Unzip will decompress a zip archive, moving all files and folders
+// within the zip file (parameter 1) to an output directory (parameter 2).
+func Unzip(src, dest string) ([]string, error) {
+	var filenames []string
+
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return filenames, err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+
+		// Store filename/path for returning and using later on
+		index := strings.Index(f.Name, "/")
+		filename := f.Name[index+1:]
+		if filename == "" {
+			continue
+		}
+		fpath := filepath.Join(dest, filename)
+
+		// Check for ZipSlip. More Info: http://bit.ly/2MsjAWE
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return filenames, fmt.Errorf("%s: illegal file path", fpath)
+		}
+
+		filenames = append(filenames, fpath)
+
+		if f.FileInfo().IsDir() {
+			// Make Folder
+			os.MkdirAll(fpath, os.ModePerm)
+			continue
+		}
+
+		// Make File
+		if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+			return filenames, err
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return filenames, err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return filenames, err
+		}
+
+		_, err = io.Copy(outFile, rc)
+
+		// Close the file without defer to close before next iteration of loop
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return filenames, err
+		}
+	}
+	return filenames, nil
+}
+
 // DownloadFile uses the url to download the file to the filepath
 func DownloadFile(url string, filepath string) error {
 	// Create the file
@@ -736,6 +895,28 @@ func DownloadFile(url string, filepath string) error {
 
 	// Write the body to file
 	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func ExecuteGitCommand(args []string) error {
+	cmd := exec.Command("git", args...)
+
+	output, err := cmd.CombinedOutput()
+	log.Infof("Output git command: %s", string(output))
+	if err != nil {
+		return errors.Errorf("Error running git command %s", err)
+	}
+
+	return nil
+}
+
+func DownloadGitRepo(url string, path string) error {
+	args := []string{"clone", url, path, "-v"}
+	err := ExecuteGitCommand(args)
 	if err != nil {
 		return err
 	}

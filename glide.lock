@@ -1,5 +1,5 @@
-hash: fc7706bbd5add40db1d34034d794abc8a892b9fb357d30d75f568bf1ba07f527
-updated: 2020-03-13T17:01:49.595596-04:00
+hash: 709db24340fbb086c161fe45c304d77eb4d5294ae658d8b5c0619d2a66328231
+updated: 2020-04-09T16:01:50.778223+01:00
 imports:
 - name: cloud.google.com/go
   version: 3b1ae45394a234c385be014e9a488f2bb6eef821
@@ -40,8 +40,6 @@ imports:
   version: d76c121f76a5fc8a462dc64594aea72fe18e1178
   subpackages:
   - errdefs
-- name: github.com/creack/pty
-  version: 8ab47f72e8547a066b4ea926f4523775bc1a0ec2
 - name: github.com/davecgh/go-spew
   version: d8f796af33cc11cb798c1aaeb27a4ebc5099927d
   subpackages:
@@ -104,6 +102,8 @@ imports:
   version: 32a13797442ccb601b11761d74232773c1402d14
 - name: github.com/ghodss/yaml
   version: 0ca9ea5df5451ffdf184b4428c902747c2c11cd7
+- name: github.com/go-git/go-git
+  version: 9d0f15c4fa712cdacfa3887e9baac918f093fbf6
 - name: github.com/go-openapi/jsonpointer
   version: ef5f0afec364d3b9396b7b77b43dbe26bf1f8004
 - name: github.com/go-openapi/jsonreference
@@ -143,8 +143,16 @@ imports:
   - ptypes/timestamp
 - name: github.com/google/btree
   version: 479b5e81b0a93ec038d201b0b33d17db599531d3
+- name: github.com/google/go-github
+  version: 371b0007be89061b4cf899dc2083dd08e3912c14
+  subpackages:
+  - github
+- name: github.com/google/go-querystring
+  version: c8c88dbee036db4e4808d1f2ec8c2e15e11c3f80
+  subpackages:
+  - query
 - name: github.com/google/gofuzz
-  version: 1868c06f7fd92d7b8635996f597f048d5ab709aa
+  version: f140a6486e521aad38f5917de355cbf147cc0496
 - name: github.com/google/uuid
   version: 8c31c18f31ede9fc8eae72290a7e7a8064e9b3e3
 - name: github.com/googleapis/gnostic
@@ -169,7 +177,7 @@ imports:
 - name: github.com/hashicorp/errwrap
   version: 8a6fb523712970c966eefc6b39ed2c5e74880354
 - name: github.com/hashicorp/go-multierror
-  version: 72917a1559e17f38638ade54020ab372ba848d67
+  version: 2004d9dba6b07a5b8d133209244f376680f9d472
 - name: github.com/hashicorp/golang-lru
   version: a0d98a5f288019575c6d1f4bb1573fef2d1fcdc4
   subpackages:
@@ -177,7 +185,7 @@ imports:
 - name: github.com/hinshun/vt10x
   version: d55458df857cfff952e4bf72ce1b567c5a4e141c
 - name: github.com/hpcloud/tail
-  version: a1dbeea552b7c8df4b542c66073e393de198a800
+  version: a30252cb686a21eb2d0b98132633053ec2f7f1e5
   subpackages:
   - ratelimiter
   - util
@@ -192,7 +200,7 @@ imports:
 - name: github.com/kballard/go-shellquote
   version: 95032a82bc518f77982ea72343cc1ade730072f0
 - name: github.com/kr/pty
-  version: 24b51915630e1d9d3c6adf15a3a96796bbc3cd43
+  version: b6e1bdd4a4f88614e0c6e5e8089c7abed98aae17
 - name: github.com/kubernetes-incubator/service-catalog
   version: 49e5cc4f90c6794d490eea4256061797223d9564
   subpackages:
@@ -226,7 +234,7 @@ imports:
 - name: github.com/mattn/go-isatty
   version: cb30d6282491c185f77d9bec5d25de1bb61a06bc
 - name: github.com/mattn/go-runewidth
-  version: 588506649b41f3e5b80a725a9bea447106b4f0d3
+  version: 14e809f6d78fcf9f48ff9b70981472b64c05f754
 - name: github.com/matttproud/golang_protobuf_extensions
   version: c12348ce28de40eed0136aa2b644d0ee0650e56c
   subpackages:
@@ -488,6 +496,13 @@ imports:
   subpackages:
   - bcrypt
   - blowfish
+  - cast5
+  - openpgp
+  - openpgp/armor
+  - openpgp/elgamal
+  - openpgp/errors
+  - openpgp/packet
+  - openpgp/s2k
   - ssh/terminal
 - name: golang.org/x/net
   version: 0ed95abb35c445290478a5348a7b38bb154135fd
@@ -573,8 +588,8 @@ imports:
   subpackages:
   - core
   - terminal
-- name: gopkg.in/fsnotify/fsnotify.v1
-  version: 45d7d09e39ef4ac08d493309fa031790c15bfe8a
+- name: gopkg.in/fsnotify.v1
+  version: 7be54206639f256967dd82fa767397ba5f8f48f5
 - name: gopkg.in/inf.v0
   version: d2d2541c53f18d2a059457998ce2876cc8e67cbf
 - name: gopkg.in/tomb.v1

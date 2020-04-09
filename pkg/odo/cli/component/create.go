@@ -13,6 +13,7 @@ import (
 	"github.com/openshift/odo/pkg/catalog"
 	"github.com/openshift/odo/pkg/component"
 	"github.com/openshift/odo/pkg/config"
+	"github.com/openshift/odo/pkg/devfile"
 	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/kclient"
 	"github.com/openshift/odo/pkg/log"
@@ -60,6 +61,8 @@ type DevfileMetadata struct {
 	devfileSupport     bool
 	devfileLink        string
 	devfileRegistry    string
+	devfilePath        string
+	downloadSource     bool
 }
 
 // CreateRecommendedCommandName is the recommended watch command name
@@ -585,7 +588,7 @@ func (co *CreateOptions) Validate() (err error) {
 			spinner := log.Spinner("Validating component")
 			defer spinner.End(false)
 
-			if util.CheckPathExists(DevfilePath) || util.CheckPathExists(EnvFilePath) {
+			if co.devfileMetadata.devfilePath == "" && (util.CheckPathExists(DevfilePath) || util.CheckPathExists(EnvFilePath)) {
 				return errors.New("Devfile.yaml or env.yaml already exists")
 			}
 
@@ -619,19 +622,88 @@ func (co *CreateOptions) Validate() (err error) {
 	return nil
 }
 
+func (co *CreateOptions) downloadProject() error {
+
+	devObj, err := devfile.Parse(co.devfileMetadata.devfilePath)
+	if err != nil {
+		return err
+	}
+	projects := devObj.Data.GetProjects()
+	nOfProjects := len(projects)
+	if nOfProjects == 0 {
+		return errors.Errorf("No project found in devfile component.")
+	}
+
+	if nOfProjects > 1 {
+		log.Warning("Only downloading first project from list.")
+	}
+
+	project := projects[0]
+
+	path, err := os.Getwd()
+	if err != nil {
+		return errors.Errorf("Could not get the current working directory: %s", err)
+	}
+
+	if co.componentContext != "" {
+		path = filepath.Join(path, co.componentContext)
+	}
+
+	// TODO: Clean this
+	if project.ClonePath != nil && *project.ClonePath != "" {
+		path = filepath.Join(path, *project.ClonePath)
+	}
+
+	var zipUrl string
+	switch project.Source.Type {
+	case "git":
+		if strings.Contains(project.Source.Location, "github.com") {
+			zipUrl, err = util.GetGitHubZipURL(project.Source.Location)
+		} else {
+			return errors.Errorf("Project type not supported")
+		}
+	case "github":
+		zipUrl, err = util.GetGitHubZipURL(project.Source.Location)
+		if err != nil {
+			return err
+		}
+	case "zip":
+		zipUrl = project.Source.Location
+	default:
+		err = errors.Errorf("Project type not supported")
+	}
+
+	err = util.DownloadAndExtractZip(zipUrl, path)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Run has the logic to perform the required actions as part of command
 func (co *CreateOptions) Run() (err error) {
 	if experimental.IsExperimentalModeEnabled() {
 		// Download devfile.yaml file and create env.yaml file
 		if co.devfileMetadata.devfileSupport {
+			if co.devfileMetadata.devfilePath == "" {
+				err := util.DownloadFile(co.devfileMetadata.devfileRegistry+co.devfileMetadata.devfileLink, DevfilePath)
+				if err != nil {
+					return errors.Wrap(err, "Faile to download devfile.yaml for devfile component")
+				}
+				co.devfileMetadata.devfilePath = DevfilePath
+			}
+
+			if co.devfileMetadata.downloadSource {
+				err = co.downloadProject()
+				if err != nil {
+					return errors.Wrap(err, "Failed to download project for devfile component")
+				}
+			}
+
 			err := co.EnvSpecificInfo.SetConfiguration("create", envinfo.ComponentSettings{Name: co.devfileMetadata.componentName, Namespace: co.devfileMetadata.componentNamespace})
 			if err != nil {
 				return errors.Wrap(err, "Failed to create env.yaml for devfile component")
-			}
-
-			err = util.DownloadFile(co.devfileMetadata.devfileRegistry+co.devfileMetadata.devfileLink, DevfilePath)
-			if err != nil {
-				return errors.Wrap(err, "Failed to download devfile.yaml for devfile component")
 			}
 
 			log.Italic("\nPlease use `odo push` command to create the component with source deployed")
@@ -719,6 +791,8 @@ func NewCmdCreate(name, fullName string) *cobra.Command {
 
 	if experimental.IsExperimentalModeEnabled() {
 		componentCreateCmd.Flags().StringVarP(&co.devfileMetadata.componentNamespace, "namespace", "n", "", "Create devfile component under specific namespace")
+		componentCreateCmd.Flags().BoolVar(&co.devfileMetadata.downloadSource, "downloadSource", false, "")
+		componentCreateCmd.Flags().StringVar(&co.devfileMetadata.devfilePath, "devfile", "./devfile.yaml", "Path to a devfile.yaml")
 	}
 
 	componentCreateCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)

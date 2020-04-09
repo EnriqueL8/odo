@@ -82,4 +82,15 @@ var _ = Describe("odo devfile create command tests", func() {
 			helper.MatchAllInOutput(output, []string{"Contain at most 63 characters"})
 		})
 	})
+
+	Context("When executing odo create with devfle component and --downloadSource flag", func() {
+		It("should succesfully create the compoment and download the source", func() {
+			helper.CmdShouldPass("odo", "preference", "set", "Experimental", "true")
+			//helper.CopyExample(filepath.Join("source", "devfiles", "nodejs"), context)
+			helper.CmdShouldPass("odo", "create", "nodejs", "--downloadSource")
+			// TODO: Check for files
+			// helper.ListFilesInDir()
+		})
+	})
+
 })
