@@ -623,7 +623,6 @@ func (co *CreateOptions) Validate() (err error) {
 }
 
 func (co *CreateOptions) downloadProject() error {
-
 	devObj, err := devfile.Parse(co.devfileMetadata.devfilePath)
 	if err != nil {
 		return err
@@ -659,8 +658,11 @@ func (co *CreateOptions) downloadProject() error {
 	case "git":
 		if strings.Contains(project.Source.Location, "github.com") {
 			zipUrl, err = util.GetGitHubZipURL(project.Source.Location)
+			if err != nil {
+				return err
+			}
 		} else {
-			return errors.Errorf("Project type not supported")
+			return errors.Errorf("Project type git with non github url not supported")
 		}
 	case "github":
 		zipUrl, err = util.GetGitHubZipURL(project.Source.Location)

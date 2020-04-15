@@ -1,5 +1,5 @@
-hash: 709db24340fbb086c161fe45c304d77eb4d5294ae658d8b5c0619d2a66328231
-updated: 2020-04-09T16:01:50.778223+01:00
+hash: f124024369115880ff40d98d62996ef39a0bed38cae4b752259e8dfd6a7391ce
+updated: 2020-04-15T11:32:36.258082+01:00
 imports:
 - name: cloud.google.com/go
   version: 3b1ae45394a234c385be014e9a488f2bb6eef821
@@ -102,8 +102,6 @@ imports:
   version: 32a13797442ccb601b11761d74232773c1402d14
 - name: github.com/ghodss/yaml
   version: 0ca9ea5df5451ffdf184b4428c902747c2c11cd7
-- name: github.com/go-git/go-git
-  version: 9d0f15c4fa712cdacfa3887e9baac918f093fbf6
 - name: github.com/go-openapi/jsonpointer
   version: ef5f0afec364d3b9396b7b77b43dbe26bf1f8004
 - name: github.com/go-openapi/jsonreference

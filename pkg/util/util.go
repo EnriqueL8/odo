@@ -743,17 +743,23 @@ func DownloadFileInMemory(url string) ([]byte, error) {
 	return content, nil
 }
 
+// Converts Git ssh remote to https
+func convertSshRemoteToHttps(remote string) string {
+	remote = strings.Replace(remote, ":", "/", 1)
+	remote = strings.Replace(remote, "git@", "https://", 1)
+	return remote
+}
+
 // DownloadFromRepoURL downloads a repo from a URL to a destination
 func GetGitHubZipURL(repoURL string) (string, error) {
 	var url string
 
-	// check if github url is ssh
+	// Convert ssh remote to https
 	if strings.HasPrefix(repoURL, "git@") {
-		//TODO: Convert url
+		repoURL = convertSshRemoteToHttps(repoURL)
 	}
 
 	// expecting string in format 'https://github.com/<owner>/<repo>'
-	// TODO: Could you have http?
 	if strings.HasPrefix(repoURL, "https://") {
 		repoURL = strings.TrimPrefix(repoURL, "https://")
 	}
@@ -788,18 +794,22 @@ func GetGitHubZipURL(repoURL string) (string, error) {
 // DownloadAndExtractZip downloads a zip file from a URL
 // and extracts it to a destination
 func DownloadAndExtractZip(zipURL string, destination string) error {
+	if !strings.HasSuffix(zipURL, ".zip") {
+		return errors.Errorf("Invalid zip url: %s", zipURL)
+	}
+
+	// Generate temporary zip file location
 	time := time.Now().Format(time.RFC3339)
 	time = strings.Replace(time, ":", "-", -1) // ":" is illegal char in windows
 	pathToTempZipFile := path.Join(os.TempDir(), "_"+time+".zip")
-	// TODO: verify zip is actually a zip url
 
-	defer {
-		// TODO understand this
-		err = DeletePath(pathToTempZipFile)
+	defer func() error {
+		err := DeletePath(pathToTempZipFile)
 		if err != nil {
 			return err
 		}
-	}
+		return nil
+	}()
 
 	err := DownloadFile(zipURL, pathToTempZipFile)
 	if err != nil {
