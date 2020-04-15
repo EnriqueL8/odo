@@ -4,7 +4,6 @@ metadata:
 projects:
 -
   name: nodejs-web-app
-  clonePath: my-project
   source:
     type: git
     location: "https://github.com/che-samples/web-nodejs-sample.git"

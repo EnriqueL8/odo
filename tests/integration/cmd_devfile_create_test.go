@@ -146,24 +146,21 @@ var _ = Describe("odo devfile create command tests", func() {
 	Context("When executing odo create with type zip", func() {
 		It("should create the compoment and download the source", func() {
 			helper.CmdShouldPass("odo", "preference", "set", "Experimental", "true")
-			projectFolder := filepath.Join(context, "project")
+			contextDevfile := helper.CreateNewDevfileContext()
+			helper.Chdir(contextDevfile)
 			devfile := "devfile.yaml"
-			err := os.Mkdir(projectFolder, os.FileMode(644))
+			helper.CopyExampleDevFile(filepath.Join("source", "devfiles", "nodejs", devfile), filepath.Join(contextDevfile, devfile))
+			err := helper.ReplaceDevfileField(devfile, "location", "https://github.com/che-samples/web-nodejs-sample/archive/master.zip")
 			if err != nil {
 				log.Info("Could not replace the entry in the devfile: " + err.Error())
 			}
-			helper.CopyExampleDevFile(filepath.Join("source", "devfiles", "nodejs", devfile), filepath.Join(projectFolder, devfile))
-			err = helper.ReplaceDevfileField("devfile.yaml", "location", "https://github.com/che-samples/web-nodejs-sample/archive/master.zip")
+			err = helper.ReplaceDevfileField(devfile, "type", "zip")
 			if err != nil {
 				log.Info("Could not replace the entry in the devfile: " + err.Error())
 			}
-			err = helper.ReplaceDevfileField("devfile.yaml", "type", "zip")
-			if err != nil {
-				log.Info("Could not replace the entry in the devfile: " + err.Error())
-			}
-			helper.CmdShouldPass("odo", "create", "nodejs", "--downloadSource", "--devfile", filepath.Join(projectFolder, devfile), "--context", context)
+			helper.CmdShouldPass("odo", "create", "nodejs", "--downloadSource", "--devfile", devfile, "--context", filepath.Join(context, "config.yaml"))
 			expectedFiles := []string{"package.json", "package-lock.json", "README.MD", devfile}
-			Expect(helper.VerifyFilesExist(projectFolder, expectedFiles)).To(Equal(true))
+			Expect(helper.VerifyFilesExist(contextDevfile, expectedFiles)).To(Equal(true))
 		})
 	})
 
