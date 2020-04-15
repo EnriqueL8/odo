@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/golang/glog"
@@ -644,13 +645,24 @@ func (co *CreateOptions) downloadProject() error {
 		return errors.Errorf("Could not get the current working directory: %s", err)
 	}
 
-	if co.componentContext != "" {
-		path = filepath.Join(path, co.componentContext)
+	if project.ClonePath != nil && *project.ClonePath != "" {
+		clonePath := *project.ClonePath
+		if runtime.GOOS == "windows" {
+			clonePath = strings.Replace(clonePath, "\\", "/", -1)
+		}
+
+		path = filepath.Join(path, clonePath)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			err = os.MkdirAll(path, os.FileMode(0755))
+			if err != nil {
+				return errors.Wrap(err, "Failed creating folder with path: "+path)
+			}
+		}
 	}
 
-	// TODO: Clean this
-	if project.ClonePath != nil && *project.ClonePath != "" {
-		path = filepath.Join(path, *project.ClonePath)
+	err = util.IsValidProjectDir(path, co.devfileMetadata.devfilePath)
+	if err != nil {
+		return err
 	}
 
 	var zipUrl string
@@ -675,7 +687,7 @@ func (co *CreateOptions) downloadProject() error {
 		err = errors.Errorf("Project type not supported")
 	}
 
-	err = util.DownloadAndExtractZip(zipUrl, path)
+	err = util.GetAndExtractZip(zipUrl, path)
 	if err != nil {
 		return err
 	}
@@ -800,7 +812,6 @@ func NewCmdCreate(name, fullName string) *cobra.Command {
 	componentCreateCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)
 
 	// Adding `--now` flag
-	genericclioptions.AddNowFlag(componentCreateCmd, &co.now)
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(componentCreateCmd)
 	//Adding `--application` flag

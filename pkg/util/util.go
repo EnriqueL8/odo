@@ -111,7 +111,6 @@ func NamespaceOpenShiftObject(componentName string, applicationName string) (str
 	}
 
 	// Return the hyphenated namespaced name
-
 	originalName := fmt.Sprintf("%s-%s", strings.Replace(componentName, "/", "-", -1), applicationName)
 	truncatedName := TruncateString(originalName, maxAllowedNamespacedStringLength)
 	if originalName != truncatedName {
@@ -722,29 +721,33 @@ func FilterIgnores(filesChanged, filesDeleted, absIgnoreRules []string) (filesCh
 	return filesChangedFiltered, filesDeletedFiltered
 }
 
-// DownloadFileInMemory uses the url to download the file and return the contents
-func DownloadFileInMemory(url string) ([]byte, error) {
-	var content []byte
-
-	// Get the data
-	var httpClient = &http.Client{Timeout: HTTPRequestTimeout}
-	resp, err := httpClient.Get(url)
+func IsValidProjectDir(path string, devfilePath string) error {
+	files, err := ioutil.ReadDir(path)
 	if err != nil {
-		return content, err
-	}
-	defer resp.Body.Close()
-
-	// Read the body e
-	_, err = io.ReadFull(resp.Body, content)
-	if err != nil {
-		return content, err
+		return err
 	}
 
-	return content, nil
+	if len(files) > 1 {
+		for _, file := range files {
+			log.Info(file.Name())
+		}
+		return errors.Errorf("Folder is not empty. It can only contain the devfile used.")
+	} else if len(files) == 1 {
+		file := files[0]
+		if file.IsDir() {
+			return errors.Errorf("Folder is not empty. It contains a subfolder.")
+		}
+		fileName := files[0].Name()
+		if fileName != devfilePath {
+			return errors.Errorf("Folder contains one element and it's not the devfile used.")
+		}
+	}
+
+	return nil
 }
 
 // Converts Git ssh remote to https
-func convertSshRemoteToHttps(remote string) string {
+func ConvertGitSSHRemoteToHTTPS(remote string) string {
 	remote = strings.Replace(remote, ":", "/", 1)
 	remote = strings.Replace(remote, "git@", "https://", 1)
 	return remote
@@ -756,7 +759,7 @@ func GetGitHubZipURL(repoURL string) (string, error) {
 
 	// Convert ssh remote to https
 	if strings.HasPrefix(repoURL, "git@") {
-		repoURL = convertSshRemoteToHttps(repoURL)
+		repoURL = ConvertGitSSHRemoteToHTTPS(repoURL)
 	}
 
 	// expecting string in format 'https://github.com/<owner>/<repo>'
@@ -791,32 +794,42 @@ func GetGitHubZipURL(repoURL string) (string, error) {
 	return url, nil
 }
 
-// DownloadAndExtractZip downloads a zip file from a URL
-// and extracts it to a destination
-func DownloadAndExtractZip(zipURL string, destination string) error {
-	if !strings.HasSuffix(zipURL, ".zip") {
+// GetAndExtractZip downloads a zip file from a URL with a http prefix or
+// takes an absolute path prefixed with file:// and extracts it to a destination
+func GetAndExtractZip(zipURL string, destination string) error {
+	if !strings.Contains(zipURL, ".zip") {
 		return errors.Errorf("Invalid zip url: %s", zipURL)
 	}
 
-	// Generate temporary zip file location
-	time := time.Now().Format(time.RFC3339)
-	time = strings.Replace(time, ":", "-", -1) // ":" is illegal char in windows
-	pathToTempZipFile := path.Join(os.TempDir(), "_"+time+".zip")
+	var pathToZip string
+	if strings.HasPrefix(zipURL, "file://") {
+		pathToZip = strings.TrimPrefix(zipURL, "file:/")
+		if runtime.GOOS == "windows" {
+			pathToZip = strings.Replace(pathToZip, "\\", "/", -1)
+		}
+	} else if strings.HasPrefix(zipURL, "http://") || strings.HasPrefix(zipURL, "https://") {
+		// Generate temporary zip file location
+		time := time.Now().Format(time.RFC3339)
+		time = strings.Replace(time, ":", "-", -1) // ":" is illegal char in windows
+		pathToZip = path.Join(os.TempDir(), "_"+time+".zip")
 
-	defer func() error {
-		err := DeletePath(pathToTempZipFile)
+		defer func() error {
+			err := DeletePath(pathToZip)
+			if err != nil {
+				return err
+			}
+			return nil
+		}()
+
+		err := DownloadFile(zipURL, pathToZip)
 		if err != nil {
 			return err
 		}
-		return nil
-	}()
+	} else {
 
-	err := DownloadFile(zipURL, pathToTempZipFile)
-	if err != nil {
-		return err
 	}
 
-	_, err = Unzip(pathToTempZipFile, destination)
+	_, err := Unzip(pathToZip, destination)
 	if err != nil {
 		return err
 	}

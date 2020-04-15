@@ -1410,3 +1410,49 @@ func TestValidateK8sResourceName(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertGitSSHRemotetoHTTPS(t *testing.T) {
+	tests := []struct {
+		name           string
+		url            string
+		expectedResult string
+	}{
+		{
+			name:           "Case 1: Git ssh url is valid",
+			url:            "git@github.com:che-samples/web-nodejs-sample.git",
+			expectedResult: "https://github.com/che-samples/web-nodejs-sample.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ConvertGitSSHRemoteToHTTPS(tt.url)
+			if !reflect.DeepEqual(result, tt.expectedResult) {
+				t.Errorf("Got %s, want %s", result, tt.expectedResult)
+			}
+		})
+	}
+}
+
+func TestGetAndExtractZip(t *testing.T) {
+	tests := []struct {
+		name          string
+		zipURL        string
+		expectedError string
+	}{
+		{
+			name:          "Case 1: Invalid zip url",
+			zipURL:        "https://github.com/che-samples/web-nodejs-sample/archive/master",
+			expectedError: "Invalid zip url: https://github.com/che-samples/web-nodejs-sample/archive/master",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := GetAndExtractZip(tt.zipURL)
+			if !reflect.DeepEqual(err.Error(), tt.expectedError) {
+				t.Errorf("Got %s, want %s", err.Error(), tt.expectedError)
+			}
+		})
+	}
+}
