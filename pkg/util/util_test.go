@@ -1434,19 +1434,15 @@ func TestConvertGitSSHRemotetoHTTPS(t *testing.T) {
 	}
 }
 
-// TODO: FIX THIS
-/*
 func TestUnzip(t *testing.T) {
 	tests := []struct {
 		name          string
-		zipURL        string
-		zipDst        string
+		zipPath       string
 		expectedFiles []string
 	}{
 		{
 			name:          "Case 1: Valid zip ",
-			zipURL:        "https://github.com/che-samples/web-nodejs-sample/archive/master.zip",
-			zipDst:        "master.zip",
+			zipPath:       "../../tests/examples/source/devfiles/nodejs-zip/master.zip",
 			expectedFiles: []string{"package.json", "package-lock.json", "app", ".gitignore", "LICENSE", "README.md"},
 		},
 	}
@@ -1457,15 +1453,9 @@ func TestUnzip(t *testing.T) {
 			if err != nil {
 				t.Errorf("Error creating temp dir: %s", err)
 			}
-			//defer os.RemoveAll(dir)
-			t.Logf(dir)
+			defer os.RemoveAll(dir)
 
-			tt.zipDst = filepath.Join(dir, tt.zipDst)
-			err = DownloadFile(tt.zipURL, tt.zipDst)
-			if err != nil {
-				t.Errorf("Error downloading zip: %s", err)
-			}
-			_, err = Unzip(tt.zipDst, dir)
+			_, err = Unzip(tt.zipPath, dir)
 			if err != nil {
 				t.Errorf("Error unzipping: %s", err)
 			}
@@ -1478,7 +1468,6 @@ func TestUnzip(t *testing.T) {
 		})
 	}
 }
-*/
 
 func TestIsValidProjectDir(t *testing.T) {
 	tests := []struct {
@@ -1571,7 +1560,6 @@ func TestIsValidProjectDir(t *testing.T) {
 	}
 }
 
-/*
 func TestGetGitHubZipURL(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1593,16 +1581,6 @@ func TestGetGitHubZipURL(t *testing.T) {
 			zipURL:        "https://github.com/che-samples//archive/master",
 			expectedError: "Invalid GitHub URL: repo cannot be empty. Expecting 'https://github.com/<owner>/<repo>'",
 		},
-		{
-			name:          "Case 4: Non-existent URL",
-			zipURL:        "https://github.com/this/does/not/exist",
-			expectedError: "Error getting zip url. Response: 404 Not Found.",
-		},
-		{
-			name:          "Case 5: Valid SSH Github URL",
-			zipURL:        "git@github.com:che-samples/web-nodejs-sample.git",
-			expectedError: "",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1613,4 +1591,3 @@ func TestGetGitHubZipURL(t *testing.T) {
 		})
 	}
 }
-*/
