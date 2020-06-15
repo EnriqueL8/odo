@@ -37,7 +37,28 @@ func (k Adapter) Push(parameters common.PushParameters) error {
 	return nil
 }
 
-// DoesComponentExist returns true if a component with the specified name exists
+// Build creates Kubernetes resources to build an image for the component
+func (k Adapter) Build(parameters common.BuildParameters) error {
+
+	err := k.componentAdapter.Build(parameters)
+	if err != nil {
+		return errors.Wrap(err, "Failed to build image for the component")
+	}
+
+	return nil
+}
+
+// Build creates Kubernetes resources to build an image for the component
+func (k Adapter) Deploy(parameters common.DeployParameters) error {
+
+	err := k.componentAdapter.Deploy(parameters)
+	if err != nil {
+		return errors.Wrap(err, "Failed to deploy the application")
+	}
+
+	return nil
+}
+
 func (k Adapter) DoesComponentExist(cmpName string) bool {
 	return k.componentAdapter.DoesComponentExist(cmpName)
 }
