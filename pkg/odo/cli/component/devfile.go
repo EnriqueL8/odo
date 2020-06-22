@@ -2,7 +2,9 @@ package component
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/openshift/odo/pkg/devfile/adapters"
@@ -216,6 +218,55 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 	log.Infof("\nDeploying application %s", componentName)
 	log.Success("Successfully deployed application")
 
+	return nil
+}
+
+// DevfileComponentDelete deletes the devfile component
+func (do *DeployDeleteOptions) DevfileDeployDelete() error {
+	// Parse devfile
+	devObj, err := devfileParser.Parse(do.DevfilePath)
+	if err != nil {
+		return err
+	}
+
+	componentName, err := getComponentName(do.componentContext)
+	if err != nil {
+		return err
+	}
+
+	kc := kubernetes.KubernetesContext{
+		Namespace: do.namespace,
+	}
+
+	devfileHandler, err := adapters.NewPlatformAdapter(componentName, do.componentContext, devObj, kc)
+	if err != nil {
+		return err
+	}
+
+	spinner := log.Spinner(fmt.Sprintf("Deleting devfile component %s", componentName))
+	defer spinner.End(false)
+
+	// Read manifest and pass bytes to deployDelete
+	// TODO: test if file is not there
+	manifestPath := filepath.Join(do.componentContext, ".odo", "manifest.yaml")
+
+	manifest, err := ioutil.ReadFile(manifestPath)
+
+	if err != nil {
+		return err
+	}
+
+	err = devfileHandler.DeployDelete(manifest)
+	if err != nil {
+		return err
+	}
+
+	err = os.Remove(manifestPath)
+	if err != nil {
+		return err
+	}
+	spinner.End(true)
+	log.Successf("Successfully deleted component")
 	return nil
 }
 
