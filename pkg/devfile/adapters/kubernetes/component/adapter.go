@@ -1,13 +1,13 @@
 package component
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +33,7 @@ import (
 	"github.com/openshift/odo/pkg/exec"
 	"github.com/openshift/odo/pkg/kclient"
 	"github.com/openshift/odo/pkg/log"
+	"github.com/openshift/odo/pkg/occlient"
 	odoutil "github.com/openshift/odo/pkg/odo/util"
 	"github.com/openshift/odo/pkg/sync"
 )
@@ -161,67 +162,72 @@ func (a Adapter) executeBuildAndPush(syncFolder string, imageTag string, compInf
 	return nil
 }
 
-// Build image for devfile project
-func (a Adapter) Build(parameters common.BuildParameters) (err error) {
-	containerName := a.ComponentName + "-container"
-	buildContainer := a.generateBuildContainer(containerName, parameters.DockerfilePath, parameters.Tag)
-	labels := map[string]string{
-		"component": a.ComponentName,
-	}
-
-	err = a.createBuildDeployment(labels, buildContainer)
-	if err != nil {
-		return errors.Wrap(err, "error while creating buildah deployment")
-	}
-
-	// Delete deployment
-	defer func() {
-		derr := a.Delete(labels)
-		if err == nil {
-			err = errors.Wrapf(derr, "failed to delete build step for component with name: %s", a.ComponentName)
-		}
-
-		rerr := os.Remove(parameters.DockerfilePath)
-		if err == nil {
-			err = errors.Wrapf(rerr, "failed to delete %s", parameters.DockerfilePath)
-		}
-	}()
-
-	_, err = a.Client.WaitForDeploymentRollout(a.ComponentName)
-	if err != nil {
-		return errors.Wrap(err, "error while waiting for deployment rollout")
-	}
-
-	// Wait for Pod to be in running state otherwise we can't sync data or exec commands to it.
-	pod, err := a.waitAndGetComponentPod(false)
-	if err != nil {
-		return errors.Wrapf(err, "unable to get pod for component %s", a.ComponentName)
-	}
-
-	// Need to wait for container to start
-	time.Sleep(5 * time.Second)
-
-	// Sync files to volume
-	log.Infof("\nSyncing to component %s", a.ComponentName)
-	// Get a sync adapter. Check if project files have changed and sync accordingly
-	syncAdapter := sync.New(a.AdapterContext, &a.Client)
-	compInfo := common.ComponentInfo{
-		ContainerName: containerName,
-		PodName:       pod.GetName(),
-	}
-
-	syncFolder, err := syncAdapter.SyncFilesBuild(parameters, compInfo)
-
-	if err != nil {
-		return errors.Wrapf(err, "failed to sync to component with name %s", a.ComponentName)
-	}
-
-	err = a.executeBuildAndPush(syncFolder, parameters.Tag, compInfo)
+func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
+	// Spinner?
+	dockerfilePath := ".odo/Dockerfile"
+	client, err := occlient.New()
 	if err != nil {
 		return err
 	}
 
+	buildName := a.ComponentName
+
+	commonObjectMeta := metav1.ObjectMeta{
+		Name: buildName,
+	}
+
+	_, err = client.CreateBuildConfigFromBinaryAndDockerfile(commonObjectMeta, dockerfilePath, parameters.Tag, []corev1.EnvVar{})
+	if err != nil {
+		return err
+	}
+
+	syncAdapter := sync.New(a.AdapterContext, &a.Client)
+	reader, err := syncAdapter.SyncFilesBuild(parameters)
+	if err != nil {
+		return err
+	}
+
+	bc, err := client.RunBuildConfigWithBinary(buildName, reader)
+	if err != nil {
+		return err
+	}
+
+	var b bytes.Buffer
+	stdout := bufio.NewWriter(&b)
+
+	// if show {
+	// 	s = log.SpinnerNoSpin("Waiting for build to finish")
+	// } else {
+	// 	s = log.Spinner("Waiting for build to finish")
+	// }
+
+	if err := client.WaitForBuildToFinish(bc.Name, stdout); err != nil {
+		return errors.Wrapf(err, "unable to build image using BuildConfig %s, error: %s", buildName, b.String())
+	}
+	fmt.Println(b.String())
+	// and apply against the cluster
+
+	//TODO: DEFER DELETE
+
+	//TODO run build config and stream logs for verbose
+
 	return
+}
+
+func (a Adapter) runKaniko() (err error) {
+	return
+}
+
+// Build image for devfile project
+func (a Adapter) Build(parameters common.BuildParameters) (err error) {
+	// TODO check BuildConfig resource is available in the cluster
+	// https://github.com/openshift/odo/blob/8faf7e5c998344938524ef6970d3dbe3bec58c6f/pkg/occlient/occlient.go#L3302
+	result := true
+	if result {
+		return a.runBuildConfig(parameters)
+	}
+
+	return a.runKaniko()
 }
 
 func determinePort(parameters common.DeployParameters) string {
@@ -250,7 +256,6 @@ func substitueYamlVariables(baseYaml []byte, yamlSubstitutions map[string]string
 
 // Build image for devfile project
 func (a Adapter) Deploy(parameters common.DeployParameters) (err error) {
-
 	namespace := a.Client.Namespace
 	applicationName := a.ComponentName + "-deploy"
 	deploymentManifest := &unstructured.Unstructured{}

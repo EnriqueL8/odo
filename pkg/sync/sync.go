@@ -19,6 +19,29 @@ type SyncClient interface {
 	ExtractProjectToComponent(common.ComponentInfo, string, io.Reader) error
 }
 
+// GetTarReader creates a tar file from files and return a reader to it
+func GetTarReader(localPath string, targetPath string, copyFiles []string, globExps []string) (reader io.Reader, err error) {
+	// Destination is set to "ToSlash" as all containers being ran within OpenShift / S2I are all
+	// Linux based and thus: "\opt\app-root\src" would not work correctly.
+	dest := filepath.ToSlash(filepath.Join(targetPath, filepath.Base(localPath)))
+
+	klog.V(4).Infof("CopyFile arguments: localPath %s, dest %s, targetPath %s, copyFiles %s, globalExps %s", localPath, dest, targetPath, copyFiles, globExps)
+	reader, writer := io.Pipe()
+	// inspired from https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/cp.go#L235
+	go func() {
+		defer writer.Close()
+
+		err := makeTar(localPath, dest, writer, copyFiles, globExps)
+		if err != nil {
+			log.Errorf("Error while creating tar: %#v", err)
+			os.Exit(1)
+		}
+
+	}()
+
+	return reader, err
+}
+
 // CopyFile copies localPath directory or list of files in copyFiles list to the directory in running Pod.
 // copyFiles is list of changed files captured during `odo watch` as well as binary file path
 // During copying binary components, localPath represent base directory path to binary and copyFiles contains path of binary

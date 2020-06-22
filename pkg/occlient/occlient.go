@@ -396,6 +396,29 @@ func (c *Client) GetPortsFromBuilderImage(componentType string) ([]string, error
 	return portList, nil
 }
 
+// RunBuildConfigWithBinary
+func (c *Client) RunBuildConfigWithBinary(name string, r io.Reader) (*buildv1.Build, error) {
+	// options := &buildv1.BinaryBuildRequestOptions{
+	// 	ObjectMeta: metav1.ObjectMeta{
+	// 		Name:      name,
+	// 		Namespace: c.Namespace,
+	// 	},
+	// }
+	result := &buildv1.Build{}
+	err := c.buildClient.RESTClient().
+		Post().
+		Namespace(c.Namespace).
+		Resource("buildconfigs").
+		Name(name).
+		SubResource("instantiatebinary").
+		Body(r).
+		//VersionedParams(options, scheme.ParameterCodec).
+		Do().
+		Into(result)
+
+	return result, err
+}
+
 // RunLogout logs out the current user from cluster
 func (c *Client) RunLogout(stdout io.Writer) error {
 	output, err := c.userClient.Users().Get("~", metav1.GetOptions{})
@@ -3110,6 +3133,21 @@ func (c *Client) GetPVCNameFromVolumeMountName(volumeMountName string, dc *appsv
 // GetPVCFromName returns the PVC of the given name
 func (c *Client) GetPVCFromName(pvcName string) (*corev1.PersistentVolumeClaim, error) {
 	return c.kubeClient.CoreV1().PersistentVolumeClaims(c.Namespace).Get(pvcName, metav1.GetOptions{})
+}
+
+// CreateBuildConfigFromBinaryAndDockerfile creates a buildConfig using the builderImage as well as gitURL.
+// envVars is the array containing the environment variables
+func (c *Client) CreateBuildConfigFromBinaryAndDockerfile(commonObjectMeta metav1.ObjectMeta, dockerfilePath string, outputImageTag string, envVars []corev1.EnvVar) (bc buildv1.BuildConfig, err error) {
+	bc = generateBuildConfigFromStream(commonObjectMeta, dockerfilePath, outputImageTag)
+
+	if len(envVars) > 0 {
+		bc.Spec.Strategy.SourceStrategy.Env = envVars
+	}
+	_, err = c.buildClient.BuildConfigs(c.Namespace).Create(&bc)
+	if err != nil {
+		return bc, errors.Wrapf(err, "unable to create BuildConfig for %s", commonObjectMeta.Name)
+	}
+	return bc, err
 }
 
 // CreateBuildConfig creates a buildConfig using the builderImage as well as gitURL.
