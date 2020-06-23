@@ -356,41 +356,38 @@ func (a Adapter) Deploy(parameters common.DeployParameters) (err error) {
 
 func (a Adapter) DeployDelete(manifest []byte) (err error) {
 	deploymentManifest := &unstructured.Unstructured{}
-
 	// Build a yaml decoder with the unstructured Scheme
 	yamlDecoder := yaml.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
-
-	_, gvk, err := yamlDecoder.Decode([]byte(manifest), nil, deploymentManifest)
-	if err != nil {
-		return err
+	manifests := bytes.Split(manifest, []byte("---"))
+	for _, splitManifest := range manifests {
+		if len(manifest) > 0 {
+			_, gvk, err := yamlDecoder.Decode([]byte(splitManifest), nil, deploymentManifest)
+			if err != nil {
+				return err
+			}
+			klog.V(3).Infof("Deploy manifest:\n\n%s", deploymentManifest)
+			gvr := schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: strings.ToLower(gvk.Kind + "s")}
+			klog.V(3).Infof("Manifest type: %s", gvr.String())
+			// TODO: Determine why using a.Client.DynamicClient doesnt work
+			// Need to create my own client in order to get the dynamic parts working
+			myclient, err := dynamic.NewForConfig(a.Client.KubeClientConfig)
+			if err != nil {
+				return err
+			}
+			// TODO: Check if resource is running in the cluster before attempting to delete Warning
+			deployment, err := myclient.Resource(gvr).Namespace(a.Client.Namespace).Get(deploymentManifest.GetName(), metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if deployment == nil {
+				log.Warningf("Could not delete deployment %v, as deployment was not found", deploymentManifest.GetName())
+			}
+			err = myclient.Resource(gvr).Namespace(a.Client.Namespace).Delete(deploymentManifest.GetName(), &metav1.DeleteOptions{})
+			if err != nil {
+				return err
+			}
+		}
 	}
-
-	klog.V(3).Infof("Deploy manifest:\n\n%s", deploymentManifest)
-	gvr := schema.GroupVersionResource{Group: gvk.Group, Version: gvk.Version, Resource: strings.ToLower(gvk.Kind + "s")}
-	klog.V(3).Infof("Manifest type: %s", gvr.String())
-
-	// TODO: Determine why using a.Client.DynamicClient doesnt work
-	// Need to create my own client in order to get the dynamic parts working
-	myclient, err := dynamic.NewForConfig(a.Client.KubeClientConfig)
-	if err != nil {
-		return err
-	}
-
-	// TODO: Check if resource is running in the cluster before attempting to delete Warning
-	deployment, err := myclient.Resource(gvr).Namespace(a.Client.Namespace).Get(deploymentManifest.GetName(), metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	if deployment == nil {
-		log.Warningf("Could not delete deployment %v, as deployment was not found", deploymentManifest.GetName())
-	}
-
-	err = myclient.Resource(gvr).Namespace(a.Client.Namespace).Delete(deploymentManifest.GetName(), &metav1.DeleteOptions{})
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
