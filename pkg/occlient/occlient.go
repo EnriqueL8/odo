@@ -397,7 +397,7 @@ func (c *Client) GetPortsFromBuilderImage(componentType string) ([]string, error
 }
 
 // RunBuildConfigWithBinary
-func (c *Client) RunBuildConfigWithBinary(name string, r io.Reader) (*buildv1.Build, error) {
+func (c *Client) RunBuildConfigWithBinaryInput(name string, r io.Reader) (*buildv1.Build, error) {
 	// options := &buildv1.BinaryBuildRequestOptions{
 	// 	ObjectMeta: metav1.ObjectMeta{
 	// 		Name:      name,
@@ -1767,7 +1767,8 @@ func (c *Client) StartBuild(name string) (string, error) {
 // WaitForBuildToFinish block and waits for build to finish. Returns error if build failed or was canceled.
 func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error {
 	// following indicates if we have already setup the following logic
-	following := false
+	// TODO: Fix the logs
+	following := true
 	klog.V(4).Infof("Waiting for %s  build to finish", buildName)
 
 	// start a watch on the build resources and look for the given build name
@@ -2045,7 +2046,7 @@ func (c *Client) FollowBuildLog(buildName string, stdout io.Writer) error {
 	}
 
 	rd, err := c.buildClient.RESTClient().Get().
-		Timeout(OcBuildTimeout).
+		Timeout(10*time.Minute).
 		Namespace(c.Namespace).
 		Resource("builds").
 		Name(buildName).
@@ -3135,9 +3136,10 @@ func (c *Client) GetPVCFromName(pvcName string) (*corev1.PersistentVolumeClaim, 
 	return c.kubeClient.CoreV1().PersistentVolumeClaims(c.Namespace).Get(pvcName, metav1.GetOptions{})
 }
 
-// CreateBuildConfigFromBinaryAndDockerfile creates a buildConfig using the builderImage as well as gitURL.
+// CreateDockerBuildConfigWithBinaryAndDockerfile creates a buildConfig which accepts
+// as input a binary which contains a dockerfile at a specific location.
 // envVars is the array containing the environment variables
-func (c *Client) CreateBuildConfigFromBinaryAndDockerfile(commonObjectMeta metav1.ObjectMeta, dockerfilePath string, outputImageTag string, envVars []corev1.EnvVar) (bc buildv1.BuildConfig, err error) {
+func (c *Client) CreateDockerBuildConfigWithBinaryInput(commonObjectMeta metav1.ObjectMeta, dockerfilePath string, outputImageTag string, envVars []corev1.EnvVar) (bc buildv1.BuildConfig, err error) {
 	bc = generateBuildConfigFromStream(commonObjectMeta, dockerfilePath, outputImageTag)
 
 	if len(envVars) > 0 {
@@ -3334,6 +3336,12 @@ func isSubDir(baseDir, otherDir string) bool {
 	//matches, _ := filepath.Match(fmt.Sprintf("%s/*", cleanedBaseDir), cleanedOtherDir)
 	matches, _ := filepath.Match(filepath.Join(cleanedBaseDir, "*"), cleanedOtherDir)
 	return matches
+}
+
+// IsBuildConfigSupported checks if buildconfig resource type is present on the cluster
+func (c *Client) IsBuildConfigSupported() (bool, error) {
+
+	return c.isResourceSupported("build.openshift.io", "v1", "buildconfigs")
 }
 
 // IsRouteSupported checks if route resource type is present on the cluster

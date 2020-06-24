@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strconv"
@@ -55,116 +56,11 @@ type Adapter struct {
 	devfileRunCmd   string
 }
 
-func (a Adapter) generateBuildContainer(containerName, dockerfilePath, imageTag string) corev1.Container {
-	buildImage := "quay.io/buildah/stable:latest"
-
-	// TODO(Optional): Init container before the buildah bud to copy over the files.
-	//command := []string{"buildah"}
-	//commandArgs := []string{"bud"}
-	command := []string{"tail"}
-	commandArgs := []string{"-f", "/dev/null"}
-
-	if dockerfilePath == "" {
-		dockerfilePath = "./Dockerfile"
-	}
-
-	// TODO: Edit dockerfile env value if mounting it sometwhere else
-	envVars := []corev1.EnvVar{
-		{Name: "Dockerfile", Value: dockerfilePath},
-		{Name: "Tag", Value: imageTag},
-	}
-
-	isPrivileged := true
-	resourceReqs := corev1.ResourceRequirements{}
-
-	container := kclient.GenerateContainer(containerName, buildImage, isPrivileged, command, commandArgs, envVars, resourceReqs, nil)
-
-	container.VolumeMounts = []corev1.VolumeMount{
-		{Name: "varlibcontainers", MountPath: "/var/lib/containers"},
-		{Name: kclient.OdoSourceVolume, MountPath: kclient.OdoSourceVolumeMount},
-	}
-
-	return *container
-}
-
-func (a Adapter) createBuildDeployment(labels map[string]string, container corev1.Container) (err error) {
-
-	objectMeta := kclient.CreateObjectMeta(a.ComponentName, a.Client.Namespace, labels, nil)
-	podTemplateSpec := kclient.GeneratePodTemplateSpec(objectMeta, []corev1.Container{container})
-
-	// TODO: For openshift, need to specify a service account that allows priviledged containers
-	saEnv := os.Getenv("BUILD_SERVICE_ACCOUNT")
-	if saEnv != "" {
-		podTemplateSpec.Spec.ServiceAccountName = saEnv
-	}
-
-	libContainersVolume := corev1.Volume{
-		Name: "varlibcontainers",
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
-	}
-
-	podTemplateSpec.Spec.Volumes = append(podTemplateSpec.Spec.Volumes, libContainersVolume)
-
-	deploymentSpec := kclient.GenerateDeploymentSpec(*podTemplateSpec)
-	klog.V(3).Infof("Creating deployment %v", deploymentSpec.Template.GetName())
-
-	_, err = a.Client.CreateDeployment(*deploymentSpec)
-	if err != nil {
-		return err
-	}
-	klog.V(3).Infof("Successfully created component %v", deploymentSpec.Template.GetName())
-
-	return nil
-}
-
-func (a Adapter) executeBuildAndPush(syncFolder string, imageTag string, compInfo common.ComponentInfo) (err error) {
-	// Running buildah bud and buildah push
-	buildahBud := "buildah bud -f $Dockerfile -t $Tag ."
-	command := []string{adaptersCommon.ShellExecutable, "-c", "cd " + syncFolder + " && " + buildahBud}
-
-	// TODO: Add spinner
-	err = exec.ExecuteCommand(&a.Client, compInfo, command, false)
-	if err != nil {
-		return errors.Wrapf(err, "failed to build image for component with name: %s", a.ComponentName)
-	}
-
-	values := strings.Split(imageTag, "/")
-	tag := imageTag
-	buildahPush := "buildah push "
-
-	// Need to change this IF to be more robust
-	if len(values) == 3 && strings.Contains(values[0], "openshift") {
-		// This needs a valid service account: e.g builder for openshift
-		// --creds flag arg has the format username:password
-		// we want to use serviceaccount:token
-		buildahPush += "--creds "
-		saEnv := os.Getenv("BUILD_SERVICE_ACCOUNT")
-		if saEnv != "" {
-			buildahPush += saEnv
-		} else {
-			buildahBud += "dummy-username"
-		}
-		buildahPush += ":$(cat /var/run/secrets/kubernetes.io/serviceaccount/token) "
-	}
-
-	//TODO: handle dockerhub case and creds!!
-	buildahPush += "--tls-verify=false " + tag + " docker://" + tag
-	command = []string{adaptersCommon.ShellExecutable, "-c", buildahPush}
-
-	//TODO: Add Spinner
-	err = exec.ExecuteCommand(&a.Client, compInfo, command, false)
-	if err != nil {
-		return errors.Wrapf(err, "failed to push build image to the registry for component with name: %s", a.ComponentName)
-	}
-
-	return nil
-}
-
 func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
 	// Spinner?
+	// TODO: This path should be a global const
 	dockerfilePath := ".odo/Dockerfile"
+	// TODO: Duplicate occlient here
 	client, err := occlient.New()
 	if err != nil {
 		return err
@@ -176,10 +72,18 @@ func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
 		Name: buildName,
 	}
 
-	_, err = client.CreateBuildConfigFromBinaryAndDockerfile(commonObjectMeta, dockerfilePath, parameters.Tag, []corev1.EnvVar{})
+	_, err = client.CreateDockerBuildConfigWithBinaryInput(commonObjectMeta, dockerfilePath, parameters.Tag, []corev1.EnvVar{})
 	if err != nil {
 		return err
 	}
+
+	defer func() {
+		// This will delete both the BuildConfig and any builds using that BuildConfig
+		derr := client.DeleteBuildConfig(commonObjectMeta)
+		if err == nil {
+			err = derr
+		}
+	}()
 
 	syncAdapter := sync.New(a.AdapterContext, &a.Client)
 	reader, err := syncAdapter.SyncFilesBuild(parameters)
@@ -187,34 +91,50 @@ func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
 		return err
 	}
 
-	bc, err := client.RunBuildConfigWithBinary(buildName, reader)
+	bc, err := client.RunBuildConfigWithBinaryInput(buildName, reader)
 	if err != nil {
 		return err
 	}
 
-	var b bytes.Buffer
-	stdout := bufio.NewWriter(&b)
+	reader, writer := io.Pipe()
+	var cmdOutput string
+	s := log.Spinner("Waiting for build to finish")
 
-	// if show {
-	// 	s = log.SpinnerNoSpin("Waiting for build to finish")
-	// } else {
-	// 	s = log.Spinner("Waiting for build to finish")
-	// }
+	//TODO: Needs to make this be passed by the verbose level
+	show := true
 
-	if err := client.WaitForBuildToFinish(bc.Name, stdout); err != nil {
-		return errors.Wrapf(err, "unable to build image using BuildConfig %s, error: %s", buildName, b.String())
+	if show {
+		// This Go routine will automatically pipe the output from WaitForBuildToFinish to
+		// our logger.
+		go func() {
+			scanner := bufio.NewScanner(reader)
+			for scanner.Scan() {
+				line := scanner.Text()
+
+				if log.IsDebug() {
+					_, err := fmt.Fprintln(os.Stdout, line)
+					if err != nil {
+						log.Errorf("Unable to print to stdout: %v", err)
+					}
+				}
+
+				cmdOutput += fmt.Sprintln(line)
+			}
+		}()
 	}
-	fmt.Println(b.String())
-	// and apply against the cluster
 
-	//TODO: DEFER DELETE
+	if err := client.WaitForBuildToFinish(bc.Name, writer); err != nil {
+		//return errors.Wrapf(err, "unable to build image using BuildConfig %s, error: %s", buildName, cmdOutput)
+		log.Warningf("unable to build image using BuildConfig %s, error: %s", buildName, err)
+		s.End(false)
+	}
 
-	//TODO run build config and stream logs for verbose
-
+	s.End(true)
 	return
 }
 
 func (a Adapter) runKaniko() (err error) {
+	// TODO: log message for Kaniko
 	return
 }
 
@@ -222,8 +142,14 @@ func (a Adapter) runKaniko() (err error) {
 func (a Adapter) Build(parameters common.BuildParameters) (err error) {
 	// TODO check BuildConfig resource is available in the cluster
 	// https://github.com/openshift/odo/blob/8faf7e5c998344938524ef6970d3dbe3bec58c6f/pkg/occlient/occlient.go#L3302
-	result := true
-	if result {
+
+	client, err := occlient.New()
+	isBuildConfigSupported, err := client.IsBuildConfigSupported()
+	if err != nil {
+		return err
+	}
+
+	if isBuildConfigSupported {
 		return a.runBuildConfig(parameters)
 	}
 
