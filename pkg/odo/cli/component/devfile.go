@@ -245,8 +245,17 @@ func (ddo *DeployDeleteOptions) DevfileDeployDelete() error {
 	spinner := log.Spinner(fmt.Sprintf("Deleting deployed devfile component %s", componentName))
 	defer spinner.End(false)
 
-	err = devfileHandler.DeployDelete(ddo.ManifestSource)
-	if err != nil {
+	manifestErr := devfileHandler.DeployDelete(ddo.ManifestSource)
+	if manifestErr != nil && strings.Contains(manifestErr.Error(), "as deployment was not found") {
+		log.Warning(manifestErr.Error())
+		err = os.Remove(ddo.ManifestPath)
+		if err != nil {
+			return err
+		}
+		spinner.End(false)
+		log.Success(ddo.ManifestPath + " deleted. Exiting gracefully :)")
+		return nil
+	} else if manifestErr != nil {
 		err = os.Remove(ddo.ManifestPath)
 		return err
 	}
