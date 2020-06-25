@@ -231,7 +231,7 @@ func (ddo *DeployDeleteOptions) DevfileDeployDelete() error {
 	if err != nil {
 		return err
 	}
-	//TODO, same name as in deploy append `-deploy` to componentName
+	componentName = componentName + "-deploy"
 
 	kc := kubernetes.KubernetesContext{
 		Namespace: ddo.namespace,

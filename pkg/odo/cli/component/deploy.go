@@ -53,7 +53,6 @@ func NewDeployOptions() *DeployOptions {
 
 // Complete completes push args
 func (do *DeployOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
-	fmt.Println("%%%%%% in deploy complete &&&&")
 	do.DevfilePath = filepath.Join(do.componentContext, do.DevfilePath)
 	envInfo, err := envinfo.NewEnvSpecificInfo(do.componentContext)
 	if err != nil {
@@ -178,9 +177,7 @@ func NewCmdDeploy(name, fullName string) *cobra.Command {
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(deployCmd)
 
-	//fmt.Println("$$$$$", DeployDeleteRecommendedCommandName, "$$$$$$")
 	deployCmd.AddCommand(deployDeleteCmd)
-	//fmt.Println("$$$$$", deployCmd.Commands()[0], "$$$$$$")
 	deployCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)
 	completion.RegisterCommandHandler(deployCmd, completion.ComponentNameCompletionHandler)
 	completion.RegisterCommandFlagHandler(deployCmd, "context", completion.FileCompletionHandler)
