@@ -366,12 +366,10 @@ func (a Adapter) DeployDelete(manifest []byte) (err error) {
 				return err
 			}
 			// TODO: Check if resource is running in the cluster before attempting to delete Warning
-			deployment, err := myclient.Resource(gvr).Namespace(a.Client.Namespace).Get(deploymentManifest.GetName(), metav1.GetOptions{})
+			_, err = myclient.Resource(gvr).Namespace(a.Client.Namespace).Get(deploymentManifest.GetName(), metav1.GetOptions{})
 			if err != nil {
-				return err
-			}
-			if deployment == nil {
-				log.Warningf("Could not delete deployment %v, as deployment was not found", deploymentManifest.GetName())
+				errorMessage := "Could not delete deployment " + deploymentManifest.GetName() + " as deployment was not found"
+				return errors.New(errorMessage)
 			}
 			err = myclient.Resource(gvr).Namespace(a.Client.Namespace).Delete(deploymentManifest.GetName(), &metav1.DeleteOptions{})
 			if err != nil {
