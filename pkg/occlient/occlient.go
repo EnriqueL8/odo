@@ -97,7 +97,7 @@ type CreateArgs struct {
 const (
 	failedEventCount                = 5
 	OcUpdateTimeout                 = 5 * time.Minute
-	OcBuildTimeout                  = 5 * time.Minute
+	OcBuildTimeout                  = 10 * time.Minute
 	OpenShiftNameSpace              = "openshift"
 	waitForComponentDeletionTimeout = 120 * time.Second
 
@@ -1767,13 +1767,14 @@ func (c *Client) StartBuild(name string) (string, error) {
 // WaitForBuildToFinish block and waits for build to finish. Returns error if build failed or was canceled.
 func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error {
 	// following indicates if we have already setup the following logic
-	// TODO: Fix the logs
-	following := true
+	following := false
 	klog.V(4).Infof("Waiting for %s  build to finish", buildName)
 
+	var timeoutSeconds int64 = 10
 	// start a watch on the build resources and look for the given build name
 	w, err := c.buildClient.Builds(c.Namespace).Watch(metav1.ListOptions{
-		FieldSelector: fields.Set{"metadata.name": buildName}.AsSelector().String(),
+		FieldSelector:  fields.Set{"metadata.name": buildName}.AsSelector().String(),
+		TimeoutSeconds: &timeoutSeconds,
 	})
 	if err != nil {
 		return errors.Wrapf(err, "unable to watch build")
