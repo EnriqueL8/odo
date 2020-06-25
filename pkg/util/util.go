@@ -1058,63 +1058,61 @@ func ValidateURL(sourceURL string) error {
 	return nil
 }
 
-// ValidateFile validates the file
-func ValidateFile(filePath string) error {
-	// Check if the file path exist
-	file, err := os.Stat(filePath)
-	if err != nil {
-		return err
+// ValidateDockerfile validates the string passed through has a FROM on it's first non-whitespace/commented line
+// This function could be expanded to be a more viable linter
+func ValidateDockerfile(contents []byte) error {
+	// Split the file downloaded line-by-line
+	splitContents := strings.Split(string(contents), "\n")
+	// The first line in a Dockerfile must be a 'FROM', whitespace, or a comment ('#')
+	// If it there is whitespace, or there are comments, keep checking until we find either a FROM, or something else
+	// If there is something other than a FROM, the file downloaded wasn't a valid Dockerfile
+	for _, line := range splitContents {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "FROM") {
+			return nil
+		}
+		return errors.Errorf("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
 	}
-
-	if file.IsDir() {
-		return errors.Errorf("%s exists but it's not a file", filePath)
-	}
-
-	return nil
+	// Would only reach this return statement if splitContents is 0
+	return errors.Errorf("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
 }
 
-// CopyFile copies file from source path to destination path
-func CopyFile(srcPath string, dstPath string, info os.FileInfo) error {
-	// Check if the source file path exists
-	err := ValidateFile(srcPath)
-	if err != nil {
-		return err
+// ValidateTag validates the string that has been passed as a tag meets the requirements of a tag
+func ValidateTag(tag string) error {
+	var splitTag = strings.Split(tag, "/")
+	if len(splitTag) != 3 {
+		return errors.New("invalid tag: odo deploy reguires a tag in the format <registry>/namespace>/<image>")
 	}
 
-	// Open source file
-	srcFile, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close() // #nosec G307
+	// Valid characters for the registry, namespace, and image name
+	characterMatch := regexp.MustCompile(`[a-zA-Z0-9\.\-:_]{4,128}`)
+	for _, element := range splitTag {
+		if len(element) < 4 {
+			return errors.New("invalid tag: " + element + " in the tag is too short. Each element needs to be at least 4 characters.")
+		}
 
-	// Create destination file
-	dstFile, err := os.Create(dstPath)
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close() // #nosec G307
+		if len(element) > 128 {
+			return errors.New("invalid tag: " + element + " in the tag is too long. Each element cannot be longer than 128.")
+		}
 
-	// Ensure destination file has the same file mode with source file
-	err = os.Chmod(dstFile.Name(), info.Mode())
-	if err != nil {
-		return err
-	}
+		// Check that the whole string matches the regular expression
+		// Match.String was returning a match even when only part of the string is working
+		if characterMatch.FindString(element) != element {
+			return errors.New("invalid tag: " + element + " in the tag contains an illegal character. It must only contain alphanumerical values, periods, colons, underscores, and dashes.")
+		}
 
-	// Copy file
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		return err
+		// The registry, namespace, and image, cannot end in '.', '-', '_',or ':'
+		if strings.HasSuffix(element, ".") || strings.HasSuffix(element, "-") || strings.HasSuffix(element, ":") || strings.HasSuffix(element, "_") {
+			return errors.New("invalid tag: " + element + " in the tag has an invalid final character. It must end in an alphanumeric value.")
+		}
 	}
-
 	return nil
-}
-
-// PathEqual compare the paths to determine if they are equal
-func PathEqual(firstPath string, secondPath string) bool {
-	firstAbsPath, _ := GetAbsPath(firstPath)
-	secondAbsPath, _ := GetAbsPath(secondPath)
-	return firstAbsPath == secondAbsPath
 }
 
 // sliceContainsString checks for existence of given string in given slice
