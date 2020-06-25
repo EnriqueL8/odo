@@ -97,7 +97,7 @@ type CreateArgs struct {
 const (
 	failedEventCount                = 5
 	OcUpdateTimeout                 = 5 * time.Minute
-	OcBuildTimeout                  = 10 * time.Minute
+	OcBuildTimeout                  = 15 * time.Minute
 	OpenShiftNameSpace              = "openshift"
 	waitForComponentDeletionTimeout = 120 * time.Second
 
@@ -1770,7 +1770,7 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 	following := false
 	klog.V(4).Infof("Waiting for %s  build to finish", buildName)
 
-	var timeoutSeconds int64 = 10
+	var timeoutSeconds int64 = 90
 	// start a watch on the build resources and look for the given build name
 	w, err := c.buildClient.Builds(c.Namespace).Watch(metav1.ListOptions{
 		FieldSelector:  fields.Set{"metadata.name": buildName}.AsSelector().String(),
@@ -1798,6 +1798,7 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 					return nil
 				case buildv1.BuildPhaseFailed, buildv1.BuildPhaseCancelled, buildv1.BuildPhaseError:
 					// the build failed/got cancelled/error occurred thus return with error
+					klog.V(4).Infof("Failed: %s ", e.Status)
 					return errors.Errorf("build %s status %s", e.Name, e.Status.Phase)
 				case buildv1.BuildPhaseRunning:
 					// since the pod is ready and the build is now running, start following the logs

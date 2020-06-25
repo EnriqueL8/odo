@@ -45,16 +45,14 @@ func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters) (reader 
 	syncFolder := "/projects"
 
 	s = log.Spinner("Checking files for deploy")
-	// run the indexer and find the modified/added/deleted/renamed files
-	files, _, err := util.RunIndexer(buildParameters.Path, absIgnoreRules)
-
-	// We will also need to copy the dockerfile if we are using one specified in the devfile
-	if buildParameters.DockerfilePath != "" {
-		files = append(files, filepath.Join(buildParameters.Path, ".odo/Dockerfile"))
-	}
-
+	// run the indexer and find the project source files
+	files, err := util.DeployRunIndexer(buildParameters.Path, absIgnoreRules)
 	if len(files) > 0 {
-		reader, err = GetTarReader(buildParameters.Path, syncFolder, files, absIgnoreRules)
+		klog.V(4).Infof("Copying files %s to pod", strings.Join(files, " "))
+		dockerfile := map[string][]byte{
+			"Dockerfile": buildParameters.DockerfileBytes,
+		}
+		reader, err = GetTarReader(buildParameters.Path, syncFolder, files, absIgnoreRules, dockerfile)
 		s.End(true)
 		return reader, err
 	}

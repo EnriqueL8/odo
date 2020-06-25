@@ -59,7 +59,7 @@ type Adapter struct {
 func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
 	// Spinner?
 	// TODO: This path should be a global const
-	dockerfilePath := ".odo/Dockerfile"
+	dockerfilePath := "./Dockerfile"
 	// TODO: Duplicate occlient here
 	client, err := occlient.New()
 	if err != nil {
@@ -97,31 +97,27 @@ func (a Adapter) runBuildConfig(parameters common.BuildParameters) (err error) {
 	}
 
 	reader, writer := io.Pipe()
-	var cmdOutput string
 	s := log.Spinner("Waiting for build to finish")
 
 	//TODO: Needs to make this be passed by the verbose level
-	show := true
+	var cmdOutput string
+	// This Go routine will automatically pipe the output from WaitForBuildToFinish to
+	// our logger.
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			line := scanner.Text()
 
-	if show {
-		// This Go routine will automatically pipe the output from WaitForBuildToFinish to
-		// our logger.
-		go func() {
-			scanner := bufio.NewScanner(reader)
-			for scanner.Scan() {
-				line := scanner.Text()
-
-				if log.IsDebug() {
-					_, err := fmt.Fprintln(os.Stdout, line)
-					if err != nil {
-						log.Errorf("Unable to print to stdout: %v", err)
-					}
+			if log.IsDebug() {
+				_, err := fmt.Fprintln(os.Stdout, line)
+				if err != nil {
+					log.Errorf("Unable to print to stdout: %v", err)
 				}
-
-				cmdOutput += fmt.Sprintln(line)
 			}
-		}()
-	}
+
+			cmdOutput += fmt.Sprintln(line)
+		}
+	}()
 
 	if err := client.WaitForBuildToFinish(bc.Name, writer); err != nil {
 		//return errors.Wrapf(err, "unable to build image using BuildConfig %s, error: %s", buildName, cmdOutput)
