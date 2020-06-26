@@ -32,7 +32,7 @@ type Adapter struct {
 	common.AdapterContext
 }
 
-// SyncsFilesBuild sync the local files to build container volume
+// SyncFilesBuild sync the local files to build container volume
 func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters, dockerfilePath string) (reader io.Reader, err error) {
 
 	// If we want to ignore any files
