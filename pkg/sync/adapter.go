@@ -33,7 +33,7 @@ type Adapter struct {
 }
 
 // SyncsFilesBuild sync the local files to build container volume
-func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters) (reader io.Reader, err error) {
+func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters, dockerfilePath string) (reader io.Reader, err error) {
 
 	// If we want to ignore any files
 	absIgnoreRules := []string{}
@@ -42,7 +42,7 @@ func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters) (reader 
 	}
 
 	var s *log.Status
-	syncFolder := "/projects"
+	syncFolder := "/"
 
 	s = log.Spinner("Checking files for deploy")
 	// run the indexer and find the project source files
@@ -50,7 +50,7 @@ func (a Adapter) SyncFilesBuild(buildParameters common.BuildParameters) (reader 
 	if len(files) > 0 {
 		klog.V(4).Infof("Copying files %s to pod", strings.Join(files, " "))
 		dockerfile := map[string][]byte{
-			"Dockerfile": buildParameters.DockerfileBytes,
+			dockerfilePath: buildParameters.DockerfileBytes,
 		}
 		reader, err = GetTarReader(buildParameters.Path, syncFolder, files, absIgnoreRules, dockerfile)
 		s.End(true)

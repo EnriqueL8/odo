@@ -315,9 +315,10 @@ func generateGitDeploymentConfig(commonObjectMeta metav1.ObjectMeta, image strin
 	return dc
 }
 
-//TODO: generateBuildConfigFromStream
-
-func generateBuildConfigFromStream(commonObjectMeta metav1.ObjectMeta, dockerfilePath, outputImageTag string) buildv1.BuildConfig {
+// generateDockerBuildConfigWithBinaryInput creates a BuildConfig which accepts a Binary (usualy archive)
+// with a Dockerfile at the path specified. It will run a build using docker, and push the resulting image
+// to the tag specified.
+func generateDockerBuildConfigWithBinaryInput(commonObjectMeta metav1.ObjectMeta, dockerfilePath, outputImageTag string) buildv1.BuildConfig {
 	buildSource := buildv1.BuildSource{
 		Binary: &buildv1.BinaryBuildSource{},
 		Type:   buildv1.BuildSourceBinary,

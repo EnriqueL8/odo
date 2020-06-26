@@ -97,7 +97,7 @@ type CreateArgs struct {
 const (
 	failedEventCount                = 5
 	OcUpdateTimeout                 = 5 * time.Minute
-	OcBuildTimeout                  = 15 * time.Minute
+	OcBuildTimeout                  = 5 * time.Minute
 	OpenShiftNameSpace              = "openshift"
 	waitForComponentDeletionTimeout = 120 * time.Second
 
@@ -398,6 +398,8 @@ func (c *Client) GetPortsFromBuilderImage(componentType string) ([]string, error
 
 // RunBuildConfigWithBinary
 func (c *Client) RunBuildConfigWithBinaryInput(name string, r io.Reader) (*buildv1.Build, error) {
+	// TODO: investigate this issue
+	// Error: no kind is registered for the type v1.BinaryBuildRequestOptions in scheme "k8s.io/client-go/kubernetes/scheme/register.go:69"
 	// options := &buildv1.BinaryBuildRequestOptions{
 	// 	ObjectMeta: metav1.ObjectMeta{
 	// 		Name:      name,
@@ -1796,7 +1798,6 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 					return nil
 				case buildv1.BuildPhaseFailed, buildv1.BuildPhaseCancelled, buildv1.BuildPhaseError:
 					// the build failed/got cancelled/error occurred thus return with error
-					klog.V(4).Infof("Failed: %s ", e.Status)
 					return errors.Errorf("build %s status %s", e.Name, e.Status.Phase)
 				case buildv1.BuildPhaseRunning:
 					// since the pod is ready and the build is now running, start following the logs
@@ -2046,7 +2047,7 @@ func (c *Client) FollowBuildLog(buildName string, stdout io.Writer) error {
 	}
 
 	rd, err := c.buildClient.RESTClient().Get().
-		Timeout(10*time.Minute).
+		Timeout(OcBuildTimeout).
 		Namespace(c.Namespace).
 		Resource("builds").
 		Name(buildName).
@@ -3136,11 +3137,12 @@ func (c *Client) GetPVCFromName(pvcName string) (*corev1.PersistentVolumeClaim, 
 	return c.kubeClient.CoreV1().PersistentVolumeClaims(c.Namespace).Get(pvcName, metav1.GetOptions{})
 }
 
-// CreateDockerBuildConfigWithBinaryAndDockerfile creates a buildConfig which accepts
-// as input a binary which contains a dockerfile at a specific location.
+// CreateDockerBuildConfigWithBinaryAndDockerfile creates a BuildConfig which accepts
+// as input a binary which contains a dockerfile at a specific location. It will build
+// the source with Dockerfile, and push the image using tag.
 // envVars is the array containing the environment variables
 func (c *Client) CreateDockerBuildConfigWithBinaryInput(commonObjectMeta metav1.ObjectMeta, dockerfilePath string, outputImageTag string, envVars []corev1.EnvVar) (bc buildv1.BuildConfig, err error) {
-	bc = generateBuildConfigFromStream(commonObjectMeta, dockerfilePath, outputImageTag)
+	bc = generateDockerBuildConfigWithBinaryInput(commonObjectMeta, dockerfilePath, outputImageTag)
 
 	if len(envVars) > 0 {
 		bc.Spec.Strategy.SourceStrategy.Env = envVars
