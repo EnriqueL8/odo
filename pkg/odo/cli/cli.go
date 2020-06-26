@@ -222,6 +222,7 @@ func reconfigureCmdWithSubcmd(cmd *cobra.Command) {
 	if cmd.Args == nil {
 		cmd.Args = cobra.ArbitraryArgs
 	}
+
 	if cmd.RunE == nil {
 		cmd.RunE = ShowSubcommands
 	}

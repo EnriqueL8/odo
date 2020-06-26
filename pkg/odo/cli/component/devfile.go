@@ -62,7 +62,7 @@ func (po *PushOptions) DevfilePush() (err error) {
 		platformContext = nil
 	} else {
 		kc := kubernetes.KubernetesContext{
-			Namespace: po.namespace,
+			Namespace: po.KClient.Namespace,
 		}
 		platformContext = kc
 	}
@@ -184,7 +184,7 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 	// Apply ignore information
 	err = genericclioptions.ApplyIgnore(&do.ignores, do.sourcePath)
 	if err != nil {
-		return errors.Wrap(err, "unable to apply ignore information")
+		return errors.Wrap(err, "Unable to apply ignore information")
 	}
 
 	kubeContext := kubernetes.KubernetesContext{
@@ -213,9 +213,59 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 		os.Exit(1)
 	}
 
-	log.Infof("\nDeploying application %s", componentName)
-	log.Success("Successfully deployed application")
+	log.Successf("Successfully deployed application %s", componentName)
 
+	return nil
+}
+
+// DevfileComponentDelete deletes the devfile component
+func (ddo *DeployDeleteOptions) DevfileDeployDelete() error {
+	// Parse devfile
+	devObj, err := devfileParser.Parse(ddo.DevfilePath)
+	if err != nil {
+		return err
+	}
+
+	componentName, err := getComponentName(ddo.componentContext)
+	if err != nil {
+		return err
+	}
+	componentName = componentName + "-deploy"
+
+	kc := kubernetes.KubernetesContext{
+		Namespace: ddo.namespace,
+	}
+
+	devfileHandler, err := adapters.NewPlatformAdapter(componentName, ddo.componentContext, devObj, kc)
+	if err != nil {
+		return err
+	}
+
+	spinner := log.Spinner(fmt.Sprintf("Deleting deployed devfile component %s", componentName))
+	defer spinner.End(false)
+
+	manifestErr := devfileHandler.DeployDelete(ddo.ManifestSource)
+	if manifestErr != nil && strings.Contains(manifestErr.Error(), "as deployment was not found") {
+		log.Warning(manifestErr.Error())
+		err = os.Remove(ddo.ManifestPath)
+		if err != nil {
+			return err
+		}
+		spinner.End(false)
+		log.Success(ddo.ManifestPath + " deleted. Exiting gracefully :)")
+		return nil
+	} else if manifestErr != nil {
+		err = os.Remove(ddo.ManifestPath)
+		return err
+	}
+
+	err = os.Remove(ddo.ManifestPath)
+	if err != nil {
+		return err
+	}
+
+	spinner.End(true)
+	log.Successf("Successfully deleted component")
 	return nil
 }
 
