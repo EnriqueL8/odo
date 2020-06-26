@@ -1770,11 +1770,9 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 	following := false
 	klog.V(4).Infof("Waiting for %s  build to finish", buildName)
 
-	var timeoutSeconds int64 = 90
 	// start a watch on the build resources and look for the given build name
 	w, err := c.buildClient.Builds(c.Namespace).Watch(metav1.ListOptions{
-		FieldSelector:  fields.Set{"metadata.name": buildName}.AsSelector().String(),
-		TimeoutSeconds: &timeoutSeconds,
+		FieldSelector: fields.Set{"metadata.name": buildName}.AsSelector().String(),
 	})
 	if err != nil {
 		return errors.Wrapf(err, "unable to watch build")
