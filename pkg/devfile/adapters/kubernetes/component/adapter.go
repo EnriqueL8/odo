@@ -322,7 +322,7 @@ func (a Adapter) Deploy(parameters common.DeployParameters) (err error) {
 			}
 			if err != nil {
 				s.End(false)
-				return errors.Wrapf(err, "Failed to %s manifest %s", actionType, gvk.Kind)
+				return errors.Wrapf(err, "Failed when %s manifest %s", actionType, gvk.Kind)
 			}
 			s.End(true)
 
@@ -379,7 +379,7 @@ func (a Adapter) Deploy(parameters common.DeployParameters) (err error) {
 		log.Successf("Successfully deployed component: %s", fullURL)
 	} else {
 		s.End(false)
-		log.Errorf("URL unable to be determined for application %s", applicationName)
+		log.Errorf("URL unable to be determined for component %s", a.ComponentName)
 	}
 
 	return nil

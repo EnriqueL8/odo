@@ -1067,7 +1067,7 @@ func ValidateURL(sourceURL string) error {
 // This function could be expanded to be a more viable linter
 func ValidateDockerfile(contents []byte) error {
 	if len(contents) == 0 {
-		return errors.New("dockerfile URL provided in the Devfile does not point to an empty file")
+		return errors.New("aplha.build-dockerfile URL provided in the Devfile is referencing an empty file")
 	}
 	// Split the file downloaded line-by-line
 	splitContents := strings.Split(string(contents), "\n")
@@ -1085,10 +1085,10 @@ func ValidateDockerfile(contents []byte) error {
 		if strings.HasPrefix(line, "FROM") {
 			return nil
 		}
-		return errors.New("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
+		return errors.New("dockerfile URL provided in the Devfile does not reference a valid Dockerfile")
 	}
 	// Would only reach this return statement if splitContents is 0
-	return errors.New("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
+	return errors.New("dockerfile URL provided in the Devfile does not reference a valid Dockerfile")
 }
 
 // ValidateTag validates the string that has been passed as a tag meets the requirements of a tag
