@@ -136,7 +136,7 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 		EnvSpecificInfo: *do.EnvSpecificInfo,
 	}
 
-	log.Infof("\nBuilding devfile component %s", componentName)
+	log.Infof("\nBuilding component %s", componentName)
 	// Build image for the component
 	err = devfileHandler.Build(buildParams)
 	if err != nil {
@@ -147,7 +147,7 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 		)
 		os.Exit(1)
 	}
-	log.Success("Successfully built image")
+	log.Successf("Successfully built container image: %s", do.tag)
 
 	deployParams := common.DeployParameters{
 		EnvSpecificInfo: *do.EnvSpecificInfo,
@@ -157,6 +157,7 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 
 	warnIfURLSInvalid(do.EnvSpecificInfo.GetURL())
 
+	log.Infof("\nDeploying component %s", componentName)
 	// Deploy the application
 	err = devfileHandler.Deploy(deployParams)
 	if err != nil {
@@ -167,8 +168,6 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 		)
 		os.Exit(1)
 	}
-
-	log.Successf("Successfully deployed application %s", componentName)
 
 	return nil
 }

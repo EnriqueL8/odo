@@ -2,7 +2,6 @@ package component
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	devfileParser "github.com/openshift/odo/pkg/devfile/parser"
@@ -85,39 +84,36 @@ func (do *DeployOptions) Validate() (err error) {
 		return errors.New("odo deploy requires a tag, in the format <registry>/namespace>/<image>")
 	}
 
+	s := log.Spinner("Validating arguments")
 	err = util.ValidateTag(do.tag)
 	if err != nil {
+		s.End(false)
 		return err
 	}
+	s.End(true)
 
 	do.devObj, err = devfileParser.Parse(do.DevfilePath)
 	if err != nil {
 		return err
 	}
 
+	s = log.Spinner("Validating build information")
 	metadata := do.devObj.Data.GetMetadata()
 	dockerfileURL := metadata.Dockerfile
-	localDir, err := os.Getwd()
-	if err != nil {
-		return err
-	}
 
 	//Download Dockerfile to .odo, build, then delete from .odo dir
 	//If Dockerfile is present in the project already, use that for the build
 	//If Dockerfile is present in the project and field is in devfile, build the one already in the project and warn the user.
-	if dockerfileURL != "" && util.CheckPathExists(filepath.Join(localDir, "Dockerfile")) {
+	if dockerfileURL != "" && util.CheckPathExists(filepath.Join(do.componentContext, "Dockerfile")) {
 		// TODO: make clearer more visible output
 		log.Warning("Dockerfile already exists in project directory and one is specified in Devfile.")
 		log.Warningf("Using Dockerfile specified in devfile from '%s'", dockerfileURL)
 	}
 
-	if !util.CheckPathExists(filepath.Join(localDir, ".odo")) {
-		return errors.Wrap(err, ".odo folder not found")
-	}
-
 	if dockerfileURL != "" {
 		dockerfileBytes, err := util.DownloadFileInMemory(dockerfileURL)
 		if err != nil {
+			s.End(false)
 			return errors.New("unable to download Dockerfile from URL specified in devfile")
 		}
 		// If we successfully downloaded the Dockerfile into memory, store it in the DeployOptions
@@ -126,15 +122,18 @@ func (do *DeployOptions) Validate() (err error) {
 		// Validate the file that was downloaded is a Dockerfile
 		err = util.ValidateDockerfile(dockerfileBytes)
 		if err != nil {
+			s.End(false)
 			return err
 		}
 
-	} else if !util.CheckPathExists(filepath.Join(localDir, "Dockerfile")) {
+	} else if !util.CheckPathExists(filepath.Join(do.componentContext, "Dockerfile")) {
+		s.End(false)
 		return errors.New("dockerfile required for build. No 'dockerfile' field found in devfile, or Dockerfile found in project directory")
 	}
 
-	// Need to add validation?
-	s := log.Spinner("Validating Manifest URL")
+	s.End(true)
+
+	s = log.Spinner("Validating deployment information")
 	manifestURL := metadata.Manifest
 	if manifestURL == "" {
 		s.End(false)

@@ -25,7 +25,6 @@ import (
 
 	"github.com/gobwas/glob"
 	"github.com/google/go-github/github"
-	"github.com/openshift/odo/pkg/log"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1067,9 +1066,7 @@ func ValidateURL(sourceURL string) error {
 // ValidateDockerfile validates the string passed through has a FROM on it's first non-whitespace/commented line
 // This function could be expanded to be a more viable linter
 func ValidateDockerfile(contents []byte) error {
-	s := log.Spinner("Validating Dockerfile")
 	if len(contents) == 0 {
-		s.End(false)
 		return errors.New("dockerfile URL provided in the Devfile does not point to an empty file")
 	}
 	// Split the file downloaded line-by-line
@@ -1086,23 +1083,18 @@ func ValidateDockerfile(contents []byte) error {
 			continue
 		}
 		if strings.HasPrefix(line, "FROM") {
-			s.End(true)
 			return nil
 		}
-		s.End(false)
 		return errors.New("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
 	}
-	s.End(false)
 	// Would only reach this return statement if splitContents is 0
 	return errors.New("dockerfile URL provided in the Devfile does not point to a valid Dockerfile")
 }
 
 // ValidateTag validates the string that has been passed as a tag meets the requirements of a tag
 func ValidateTag(tag string) error {
-	s := log.Spinner("Validating Tag")
 	var splitTag = strings.Split(tag, "/")
 	if len(splitTag) != 3 {
-		s.End(false)
 		return errors.New("invalid tag: odo deploy reguires a tag in the format <registry>/namespace>/<image>")
 	}
 
@@ -1110,29 +1102,24 @@ func ValidateTag(tag string) error {
 	characterMatch := regexp.MustCompile(`[a-zA-Z0-9\.\-:_]{4,128}`)
 	for _, element := range splitTag {
 		if len(element) < 4 {
-			s.End(false)
 			return errors.New("invalid tag: " + element + " in the tag is too short. Each element needs to be at least 4 characters.")
 		}
 
 		if len(element) > 128 {
-			s.End(false)
 			return errors.New("invalid tag: " + element + " in the tag is too long. Each element cannot be longer than 128.")
 		}
 
 		// Check that the whole string matches the regular expression
 		// Match.String was returning a match even when only part of the string is working
 		if characterMatch.FindString(element) != element {
-			s.End(false)
 			return errors.New("invalid tag: " + element + " in the tag contains an illegal character. It must only contain alphanumerical values, periods, colons, underscores, and dashes.")
 		}
 
 		// The registry, namespace, and image, cannot end in '.', '-', '_',or ':'
 		if strings.HasSuffix(element, ".") || strings.HasSuffix(element, "-") || strings.HasSuffix(element, ":") || strings.HasSuffix(element, "_") {
-			s.End(false)
 			return errors.New("invalid tag: " + element + " in the tag has an invalid final character. It must end in an alphanumeric value.")
 		}
 	}
-	s.End(true)
 	return nil
 }
 
