@@ -117,7 +117,7 @@ func (do *DeployOptions) DevfileDeploy() (err error) {
 	// Apply ignore information
 	err = genericclioptions.ApplyIgnore(&do.ignores, do.sourcePath)
 	if err != nil {
-		return errors.Wrap(err, uUnable to apply ignore information")
+		return errors.Wrap(err, "unable to apply ignore information")
 	}
 
 	kubeContext := kubernetes.KubernetesContext{
