@@ -20,10 +20,11 @@ import (
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
 )
 
-// TODO: add CLI Reference doc
-// TODO: add delete example
-var deployCmdExample = ktemplates.Examples(`  # Build and Deploy our application.Deploys an image and deploys the application 
+var deployCmdExample = ktemplates.Examples(`  # Build and Deploy the current component 
 %[1]s
+
+# Specify the tag for the image by calling
+%[1]s --tag <registry>/<namespace>/<image>:<tag>
   `)
 
 // DeployRecommendedCommandName is the recommended build command name
@@ -53,9 +54,18 @@ func NewDeployOptions() *DeployOptions {
 	return &DeployOptions{}
 }
 
+// CompleteDevfilePath completes the devfile path from context
+func (do *DeployOptions) CompleteDevfilePath() {
+	if len(do.DevfilePath) > 0 {
+		do.DevfilePath = filepath.Join(do.componentContext, do.DevfilePath)
+	} else {
+		do.DevfilePath = filepath.Join(do.componentContext, "devfile.yaml")
+	}
+}
+
 // Complete completes deploy args
 func (do *DeployOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
-	do.DevfilePath = filepath.Join(do.componentContext, do.DevfilePath)
+	do.CompleteDevfilePath()
 	envInfo, err := envinfo.NewEnvSpecificInfo(do.componentContext)
 	if err != nil {
 		return errors.Wrap(err, "unable to retrieve configuration information")
@@ -80,11 +90,6 @@ func (do *DeployOptions) Validate() (err error) {
 		return err
 	}
 
-	return
-}
-
-// Run has the logic to perform the required actions as part of command
-func (do *DeployOptions) Run() (err error) {
 	do.devObj, err = devfileParser.Parse(do.DevfilePath)
 	if err != nil {
 		return err
@@ -128,30 +133,32 @@ func (do *DeployOptions) Run() (err error) {
 		return errors.New("dockerfile required for build. No 'dockerfile' field found in devfile, or Dockerfile found in project directory")
 	}
 
-	err = do.DevfileBuild()
-	if err != nil {
-		return err
-	}
-
 	// Need to add validation?
-	// s := log.Spinner("Validating Dockerfile")
-	// s.End(true)
-	// s.End(false)
+	s := log.Spinner("Validating Manifest URL")
 	manifestURL := metadata.Manifest
 	if manifestURL == "" {
+		s.End(false)
 		return errors.New("Unable to deploy as alpha.deployment-manifest is not defined in devfile.yaml")
 	}
 
 	err = util.ValidateURL(manifestURL)
 	if err != nil {
+		s.End(false)
 		return errors.New(fmt.Sprintf("Invalid manifest url: %s, %s", manifestURL, err))
 	}
 
 	do.ManifestSource, err = util.DownloadFileInMemory(manifestURL)
 	if err != nil {
+		s.End(false)
 		return errors.New(fmt.Sprintf("Unable to download manifest: %s, %s", manifestURL, err))
 	}
+	s.End(true)
 
+	return
+}
+
+// Run has the logic to perform the required actions as part of command
+func (do *DeployOptions) Run() (err error) {
 	err = do.DevfileDeploy()
 	if err != nil {
 		return err
@@ -185,7 +192,6 @@ func NewCmdDeploy(name, fullName string) *cobra.Command {
 	genericclioptions.AddContextFlag(deployCmd, &do.componentContext)
 
 	// enable devfile flag if experimental mode is enabled
-	deployCmd.Flags().StringVar(&do.DevfilePath, "devfile", "./devfile.yaml", "Path to a devfile.yaml")
 	deployCmd.Flags().StringVar(&do.tag, "tag", "", "Tag used to build the image")
 	deployCmd.Flags().StringSliceVar(&do.ignores, "ignore", []string{}, "Files or folders to be ignored via glob expressions.")
 

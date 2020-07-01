@@ -50,7 +50,7 @@ var _ = Describe("odo devfile deploy command tests", func() {
 
 			helper.CopyExampleDevFile(filepath.Join("source", "devfilesV2", "nodejs", "devfile.yaml"), filepath.Join(context, "devfile.yaml"))
 			output := helper.CmdShouldPass("odo", "deploy", "--tag", imageTag)
-			cliRunner.WaitAndCheckForExistence("BuildConfig", namespace, 1)
+			cliRunner.WaitAndCheckForExistence("buildconfig", namespace, 1)
 			Expect(output).NotTo(ContainSubstring("does not point to a valid Dockerfile"))
 			Expect(output).To(ContainSubstring("Successfully built image"))
 			Expect(output).To(ContainSubstring("Successfully deployed application"))
