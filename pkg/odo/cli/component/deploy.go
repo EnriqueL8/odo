@@ -37,6 +37,7 @@ type DeployOptions struct {
 	EnvSpecificInfo  *envinfo.EnvSpecificInfo
 
 	DevfilePath     string
+	devObj          devfileParser.DevfileObj
 	DockerfileURL   string
 	DockerfileBytes []byte
 	namespace       string
@@ -85,12 +86,12 @@ func (do *DeployOptions) Validate() (err error) {
 
 // Run has the logic to perform the required actions as part of command
 func (do *DeployOptions) Run() (err error) {
-	devObj, err := devfileParser.Parse(do.DevfilePath)
+	do.devObj, err = devfileParser.Parse(do.DevfilePath)
 	if err != nil {
 		return err
 	}
 
-	metadata := devObj.Data.GetMetadata()
+	metadata := do.devObj.Data.GetMetadata()
 	dockerfileURL := metadata.Dockerfile
 	localDir, err := os.Getwd()
 	if err != nil {
@@ -141,7 +142,7 @@ func (do *DeployOptions) Run() (err error) {
 		return errors.Wrap(err, "Unable to download manifest "+manifestURL)
 	}
 
-	err = do.DevfileDeploy(devObj)
+	err = do.DevfileDeploy()
 	if err != nil {
 		return err
 	}

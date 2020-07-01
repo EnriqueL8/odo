@@ -102,7 +102,7 @@ func (po *PushOptions) DevfilePush() (err error) {
 }
 
 //DevfileDeploy
-func (do *DeployOptions) DevfileDeploy(devObj devfileParser.DevfileObj) (err error) {
+func (do *DeployOptions) DevfileDeploy() (err error) {
 	componentName, err := getComponentName(do.componentContext)
 	if err != nil {
 		return errors.Wrap(err, "unable to get component name")
@@ -124,7 +124,7 @@ func (do *DeployOptions) DevfileDeploy(devObj devfileParser.DevfileObj) (err err
 		Namespace: do.namespace,
 	}
 
-	devfileHandler, err := adapters.NewPlatformAdapter(componentName, do.componentContext, devObj, kubeContext)
+	devfileHandler, err := adapters.NewPlatformAdapter(componentName, do.componentContext, do.devObj, kubeContext)
 	if err != nil {
 		return err
 	}
