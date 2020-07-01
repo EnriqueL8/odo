@@ -58,10 +58,10 @@ type DevfileMetadata struct {
 	Version string `json:"version,omitempty"`
 
 	// Dockerfile optional URL to remote Dockerfile
-	Dockerfile string `json:"dockerfile,omitempty"`
+	Dockerfile string `json:"alpha.build-dockerfile,omitempty"`
 
 	// Manifest optional URL to remote Deployment Manifest
-	Manifest string `json:"deployment-manifest,omitempty"`
+	Manifest string `json:"alpha.deployment-manifest,omitempty"`
 }
 
 // DevfileCommand command specified in devfile
@@ -100,15 +100,6 @@ type DevfileComponent struct {
 
 	// Volume component
 	Volume *Volume `json:"volume,omitempty"`
-
-	// Dockerfile component
-	Dockerfile *Dockerfile `json:"dockerfile,omitempty"`
-}
-
-// Dockerfile cmponent
-type Dockerfile struct {
-	Path string   `json:"path"`
-	Args []string `json:"args,omitempty"`
 }
 
 // DevfileProject project defined in devfile

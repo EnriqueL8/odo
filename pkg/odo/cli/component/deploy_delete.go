@@ -10,7 +10,6 @@ import (
 	projectCmd "github.com/openshift/odo/pkg/odo/cli/project"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
 	"github.com/openshift/odo/pkg/odo/util/completion"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
@@ -31,21 +30,21 @@ const DeployDeleteRecommendedCommandName = "delete"
 
 // DeployDeleteOptions encapsulates options that deploy delete command uses
 type DeployDeleteOptions struct {
-	*CommonPushOptions
+	componentContext string
+	EnvSpecificInfo  *envinfo.EnvSpecificInfo
 
-	// devfile path
 	DevfilePath    string
 	namespace      string
 	ManifestPath   string
 	ManifestSource []byte
+
+	*genericclioptions.Context
 }
 
 // NewDeployDeleteOptions returns new instance of DeployDeleteOptions
 // with "default" values for certain values, for example, show is "false"
 func NewDeployDeleteOptions() *DeployDeleteOptions {
-	return &DeployDeleteOptions{
-		CommonPushOptions: NewCommonPushOptions(),
-	}
+	return &DeployDeleteOptions{}
 }
 
 // Complete completes push args
@@ -105,11 +104,6 @@ func NewCmdDeployDelete(name, fullName string) *cobra.Command {
 		},
 	}
 	genericclioptions.AddContextFlag(deployDeleteCmd, &ddo.componentContext)
-
-	// enable devfile flag if experimental mode is enabled
-	if experimental.IsExperimentalModeEnabled() {
-		deployDeleteCmd.Flags().StringVar(&ddo.DevfilePath, "devfile", "./devfile.yaml", "Path to a devfile.yaml")
-	}
 
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(deployDeleteCmd)

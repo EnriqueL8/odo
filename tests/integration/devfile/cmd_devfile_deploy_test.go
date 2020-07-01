@@ -1,6 +1,7 @@
 package devfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -47,9 +48,12 @@ var _ = Describe("odo devfile deploy command tests", func() {
 			helper.CmdShouldPass("odo", "create", "nodejs", "--project", namespace, cmpName)
 			helper.CmdShouldPass("odo", "url", "create", "--port", "3000")
 
+			imageTag = fmt.Sprintf("image-registry.openshift-image-registry.svc:5000/%s/my-nodejs:1.0", namespace)
 			helper.CopyExampleDevFile(filepath.Join("source", "devfilesV2", "nodejs", "devfile.yaml"), filepath.Join(context, "devfile.yaml"))
-			output := helper.CmdShouldPass("odo", "deploy", "--tag", imageTag, "--devfile", "devfile.yaml")
+			output := helper.CmdShouldPass("odo", "deploy", "--tag", imageTag, "devfile.yaml", "-v", "4")
 			Expect(output).NotTo(ContainSubstring("does not point to a valid Dockerfile"))
+			Expect(output).To(ContainSubstring("Successfully built image"))
+			Expect(output).To(ContainSubstring("Successfully deployed application"))
 		})
 	})
 
@@ -62,17 +66,32 @@ var _ = Describe("odo devfile deploy command tests", func() {
 			err := helper.ReplaceDevfileField("devfile.yaml", "dockerfile", "https://google.com")
 			Expect(err).To(BeNil())
 
+			imageTag = fmt.Sprintf("image-registry.openshift-image-registry.svc:5000/%s/my-nodejs:1.0", namespace)
 			cmdOutput := helper.CmdShouldFail("odo", "deploy", "--tag", imageTag, "--devfile", "devfile.yaml")
 			Expect(cmdOutput).To(ContainSubstring("does not point to a valid Dockerfile"))
 		})
 	})
 
+	// This test depends on the nodejs stack to no have a alpha.build-dockerfile field.
+	// This may not be the case in the future when the stack gets updated.
 	Context("Verify error when no Dockerfile exists in project and no 'dockerfile' specified in devfile", func() {
 		It("Should error out with 'dockerfile required for build.'", func() {
 			helper.CmdShouldPass("odo", "create", "nodejs", "--project", namespace, cmpName)
 			helper.CmdShouldPass("odo", "url", "create", "--port", "3000")
+			imageTag = fmt.Sprintf("image-registry.openshift-image-registry.svc:5000/%s/my-nodejs:1.0", namespace)
 			cmdOutput := helper.CmdShouldFail("odo", "deploy", "--tag", imageTag, "--devfile", "devfile.yaml")
-			Expect(cmdOutput).To(ContainSubstring("dockerfile required for build. No 'dockerfile' field found in devfile, or Dockerfile found in project directory"))
+			Expect(cmdOutput).To(ContainSubstring("dockerfile required for build. No 'alpha.build-dockerfile' field found in devfile, or Dockerfile found in project directory"))
 		})
 	})
+
+	// Context("Verify error when no Dockerfile exists in project and no 'dockerfile' specified in devfile", func() {
+	// 	It("Should error out with 'dockerfile required for build.'", func() {
+	// 		helper.CmdShouldPass("odo", "create", "nodejs", "--project", namespace, cmpName)
+	// 		helper.CmdShouldPass("odo", "url", "create", "--port", "3000")
+	// 		imageTag = fmt.Sprintf("image-registry.openshift-image-registry.svc:5000/%s/my-nodejs:1.0", namespace)
+	// 		cmdOutput := helper.CmdShouldFail("odo", "deploy", "--tag", imageTag, "--devfile", "devfile.yaml")
+
+	// 		Expect(cmdOutput).To(ContainSubstring("dockerfile required for build. No 'dockerfile' field found in devfile, or Dockerfile found in project directory"))
+	// 	})
+	// })
 })

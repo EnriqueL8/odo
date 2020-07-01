@@ -11,7 +11,6 @@ import (
 	projectCmd "github.com/openshift/odo/pkg/odo/cli/project"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
 	"github.com/openshift/odo/pkg/odo/util/completion"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/openshift/odo/pkg/util"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -23,7 +22,7 @@ import (
 
 // TODO: add CLI Reference doc
 // TODO: add delete example
-var deployCmdExample = ktemplates.Examples(`  # Deploys an image and deploys the application 
+var deployCmdExample = ktemplates.Examples(`  # Build and Deploy our application.Deploys an image and deploys the application 
 %[1]s
   `)
 
@@ -32,9 +31,11 @@ const DeployRecommendedCommandName = "deploy"
 
 // DeployOptions encapsulates options that build command uses
 type DeployOptions struct {
-	*CommonPushOptions
+	componentContext string
+	sourcePath       string
+	ignores          []string
+	EnvSpecificInfo  *envinfo.EnvSpecificInfo
 
-	// devfile path
 	DevfilePath     string
 	DockerfileURL   string
 	DockerfileBytes []byte
@@ -42,17 +43,17 @@ type DeployOptions struct {
 	tag             string
 	ManifestSource  []byte
 	deployOnly      bool
+
+	*genericclioptions.Context
 }
 
 // NewDeployOptions returns new instance of BuildOptions
 // with "default" values for certain values, for example, show is "false"
 func NewDeployOptions() *DeployOptions {
-	return &DeployOptions{
-		CommonPushOptions: NewCommonPushOptions(),
-	}
+	return &DeployOptions{}
 }
 
-// Complete completes push args
+// Complete completes deploy args
 func (do *DeployOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
 	do.DevfilePath = filepath.Join(do.componentContext, do.DevfilePath)
 	envInfo, err := envinfo.NewEnvSpecificInfo(do.componentContext)
@@ -68,6 +69,7 @@ func (do *DeployOptions) Complete(name string, cmd *cobra.Command, args []string
 // Validate validates the push parameters
 func (do *DeployOptions) Validate() (err error) {
 
+	log.Infof("\nValidation")
 	// Validate the --tag
 	if do.tag == "" {
 		return errors.New("odo deploy requires a tag, in the format <registry>/namespace>/<image>")
@@ -125,22 +127,21 @@ func (do *DeployOptions) Run() (err error) {
 			}
 
 		} else if !util.CheckPathExists(filepath.Join(localDir, "Dockerfile")) {
-			return errors.New("dockerfile required for build. No 'dockerfile' field found in devfile, or Dockerfile found in project directory")
-		}
-
-		err = do.DevfileBuild()
-		if err != nil {
-			return err
+			return errors.New("dockerfile required for build. No 'alpha.build-dockerfile' field found in devfile, or Dockerfile found in project directory")
 		}
 	}
 
+	// Need to add validation?
+	// s := log.Spinner("Validating Dockerfile")
+	// s.End(true)
+	// s.End(false)
 	manifestURL := metadata.Manifest
 	do.ManifestSource, err = util.DownloadFileInMemory(manifestURL)
 	if err != nil {
 		return errors.Wrap(err, "Unable to download manifest "+manifestURL)
 	}
 
-	err = do.DevfileDeploy()
+	err = do.DevfileDeploy(devObj)
 	if err != nil {
 		return err
 	}
@@ -173,11 +174,10 @@ func NewCmdDeploy(name, fullName string) *cobra.Command {
 	genericclioptions.AddContextFlag(deployCmd, &do.componentContext)
 
 	// enable devfile flag if experimental mode is enabled
-	if experimental.IsExperimentalModeEnabled() {
-		deployCmd.Flags().StringVar(&do.DevfilePath, "devfile", "./devfile.yaml", "Path to a devfile.yaml")
-		deployCmd.Flags().StringVar(&do.tag, "tag", "", "Tag used to build the image")
-		deployCmd.Flags().BoolVar(&do.deployOnly, "deployOnly", false, "Do not build the application, only deploy it")
-	}
+	deployCmd.Flags().StringVar(&do.DevfilePath, "devfile", "./devfile.yaml", "Path to a devfile.yaml")
+	deployCmd.Flags().StringVar(&do.tag, "tag", "", "Tag used to build the image")
+	deployCmd.Flags().BoolVar(&do.deployOnly, "deployOnly", false, "Do not build the application, only deploy it")
+	deployCmd.Flags().StringSliceVar(&do.ignores, "ignore", []string{}, "Files or folders to be ignored via glob expressions.")
 
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(deployCmd)

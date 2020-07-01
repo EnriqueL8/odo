@@ -85,6 +85,7 @@ func (a Adapter) runBuildConfig(client *occlient.Client, parameters common.Build
 		return err
 	}
 
+	log.Successf("Started build using BuildConfig")
 	bc, err := client.RunBuildConfigWithBinaryInput(buildName, reader)
 	if err != nil {
 		return err
