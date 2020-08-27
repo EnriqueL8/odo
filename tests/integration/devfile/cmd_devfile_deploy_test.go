@@ -29,7 +29,7 @@ var _ = Describe("odo devfile deploy command tests", func() {
 		originalKubeconfig = os.Getenv("KUBECONFIG")
 		helper.LocalKubeconfigSet(context)
 		namespace = cliRunner.CreateRandNamespaceProject()
-		registryURL := oc.GetInternalRegistryURL()
+		registryURL := "docker-registry.default.svc.cluster.local:5000"
 		Expect(registryURL).NotTo(Equal(""))
 		imageTag = fmt.Sprintf("%s/%s/my-nodejs:1.0", registryURL, namespace)
 		currentWorkingDirectory = helper.Getwd()
