@@ -1,0 +1,52 @@
+---
+schemaVersion: 2.0.0
+metadata:
+  name: foobar-
+starterProjects:
+  - name: springbootproject
+    git:
+      remotes:
+        origin: "https://github.com/maysunfaisal/springboot.git"
+components:
+  - name: tools
+    container:
+      image: maysunfaisal/springbootbuild
+      memoryLimit: 768Mi
+      command: ['tail']
+      args: [ '-f', '/dev/null']
+      volumeMounts:
+        - name: springbootpvc
+          path: /data
+      mountSources: true
+  - name: runtime
+    container:
+      image: maysunfaisal/springbootruntime
+      memoryLimit: 768Mi
+      command: ['tail']
+      args: [ '-f', '/dev/null']
+      endpoints:
+        - name: "8080/tcp"
+          targetPort: 8080
+      volumeMounts:
+        - name: springbootpvc
+          path: /data
+      mountSources: false
+  - name: springbootpvc
+    volume: {}
+commands:
+  - id: defaultBuild
+    exec:
+      component: tools
+      commandLine: "/artifacts/bin/build-container-full.sh"
+      workingDir: /projects
+      group:
+        kind: build
+        isDefault: true
+  - id: defaultRun
+    exec:
+      component: runtime
+      commandLine: "/artifacts/bin/start-server.sh"
+      workingDir: /
+      group:
+        kind: run
+        isDefault: true

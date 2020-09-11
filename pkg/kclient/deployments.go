@@ -1,6 +1,7 @@
 package kclient
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -42,9 +43,17 @@ func getDeploymentCondition(status appsv1.DeploymentStatus, condType appsv1.Depl
 	return nil
 }
 
+// ListDeployments lists all deployments by selector
+func (c *Client) ListDeployments(selector string) (*appsv1.DeploymentList, error) {
+
+	return c.KubeClient.AppsV1().Deployments(c.Namespace).List(metav1.ListOptions{
+		LabelSelector: selector,
+	})
+}
+
 // WaitForDeploymentRollout waits for deployment to finish rollout. Returns the state of the deployment after rollout.
 func (c *Client) WaitForDeploymentRollout(deploymentName string) (*appsv1.Deployment, error) {
-	klog.V(4).Infof("Waiting for %s deployment rollout", deploymentName)
+	klog.V(3).Infof("Waiting for %s deployment rollout", deploymentName)
 	s := log.Spinner("Waiting for component to start")
 	defer s.End(false)
 
@@ -69,23 +78,28 @@ func (c *Client) WaitForDeploymentRollout(deploymentName string) (*appsv1.Deploy
 			}
 			//based on https://github.com/kubernetes/kubectl/blob/9a3954bf653c874c8af6f855f2c754a8e1a44b9e/pkg/polymorphichelpers/rollout_status.go#L66-L91
 			if deployment, ok := val.Object.(*appsv1.Deployment); ok {
+				for _, cond := range deployment.Status.Conditions {
+					// using this just for debugging message, so ignoring error on purpose
+					jsonCond, _ := json.Marshal(cond)
+					klog.V(3).Infof("Deployment Condition: %s", string(jsonCond))
+				}
 				if deployment.Generation <= deployment.Status.ObservedGeneration {
 					cond := getDeploymentCondition(deployment.Status, appsv1.DeploymentProgressing)
 					if cond != nil && cond.Reason == timedOutReason {
 						failure <- fmt.Errorf("deployment %q exceeded its progress deadline", deployment.Name)
 					} else if deployment.Spec.Replicas != nil && deployment.Status.UpdatedReplicas < *deployment.Spec.Replicas {
-						klog.V(4).Infof("Waiting for deployment %q rollout to finish: %d out of %d new replicas have been updated...\n", deployment.Name, deployment.Status.UpdatedReplicas, *deployment.Spec.Replicas)
+						klog.V(3).Infof("Waiting for deployment %q rollout to finish: %d out of %d new replicas have been updated...\n", deployment.Name, deployment.Status.UpdatedReplicas, *deployment.Spec.Replicas)
 					} else if deployment.Status.Replicas > deployment.Status.UpdatedReplicas {
-						klog.V(4).Infof("Waiting for deployment %q rollout to finish: %d old replicas are pending termination...\n", deployment.Name, deployment.Status.Replicas-deployment.Status.UpdatedReplicas)
+						klog.V(3).Infof("Waiting for deployment %q rollout to finish: %d old replicas are pending termination...\n", deployment.Name, deployment.Status.Replicas-deployment.Status.UpdatedReplicas)
 					} else if deployment.Status.AvailableReplicas < deployment.Status.UpdatedReplicas {
-						klog.V(4).Infof("Waiting for deployment %q rollout to finish: %d of %d updated replicas are available...\n", deployment.Name, deployment.Status.AvailableReplicas, deployment.Status.UpdatedReplicas)
+						klog.V(3).Infof("Waiting for deployment %q rollout to finish: %d of %d updated replicas are available...\n", deployment.Name, deployment.Status.AvailableReplicas, deployment.Status.UpdatedReplicas)
 					} else {
 						s.End(true)
-						klog.V(4).Infof("Deployment %q successfully rolled out\n", deployment.Name)
+						klog.V(3).Infof("Deployment %q successfully rolled out\n", deployment.Name)
 						success <- deployment
 					}
 				}
-				klog.V(4).Infof("Waiting for deployment spec update to be observed...\n")
+				klog.V(3).Infof("Waiting for deployment spec update to be observed...\n")
 
 			} else {
 				failure <- errors.New("unable to convert event object to Pod")
@@ -152,15 +166,15 @@ func (c *Client) DeleteDeployment(labels map[string]string) error {
 	}
 	// convert labels to selector
 	selector := util.ConvertLabelsToSelector(labels)
-	klog.V(4).Infof("Selectors used for deletion: %s", selector)
+	klog.V(3).Infof("Selectors used for deletion: %s", selector)
 
 	// Delete Deployment
-	klog.V(4).Info("Deleting Deployment")
+	klog.V(3).Info("Deleting Deployment")
 
 	return c.KubeClient.AppsV1().Deployments(c.Namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
 }
 
-// CreateDynamicDeployment creates a dynamic deployment for Operator backed service
+// CreateDynamicResource creates a dynamic custom resource
 func (c *Client) CreateDynamicResource(exampleCustomResource map[string]interface{}, group, version, resource string) error {
 	deploymentRes := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
 
@@ -188,4 +202,11 @@ func (c *Client) ListDynamicResource(group, version, resource string) (*unstruct
 	}
 
 	return list, nil
+}
+
+// DeleteDynamicResource deletes an instance, specified by name, of a Custom Resource
+func (c *Client) DeleteDynamicResource(name, group, version, resource string) error {
+	deploymentRes := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+
+	return c.DynamicClient.Resource(deploymentRes).Namespace(c.Namespace).Delete(name, &metav1.DeleteOptions{})
 }

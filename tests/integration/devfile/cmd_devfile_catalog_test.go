@@ -8,12 +8,13 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/openshift/odo/tests/helper"
+	"github.com/openshift/odo/tests/integration/devfile/utils"
 )
 
 var _ = Describe("odo devfile catalog command tests", func() {
 	var project, context, currentWorkingDirectory, originalKubeconfig string
 	const registryName string = "RegistryName"
-	const addRegistryURL string = "https://raw.githubusercontent.com/odo-devfiles/registry/master"
+	const addRegistryURL string = "https://github.com/odo-devfiles/registry"
 
 	// Using program commmand according to cliRunner in devfile
 	cliRunner := helper.GetCliRunner()
@@ -23,13 +24,17 @@ var _ = Describe("odo devfile catalog command tests", func() {
 		SetDefaultEventuallyTimeout(10 * time.Minute)
 		context = helper.CreateNewContext()
 		os.Setenv("GLOBALODOCONFIG", filepath.Join(context, "config.yaml"))
-		helper.CmdShouldPass("odo", "preference", "set", "Experimental", "true")
 
 		originalKubeconfig = os.Getenv("KUBECONFIG")
 		helper.LocalKubeconfigSet(context)
 		project = cliRunner.CreateRandNamespaceProject()
 		currentWorkingDirectory = helper.Getwd()
 		helper.Chdir(context)
+
+		// For some reason on TravisCI, there are flakes with regards to registrycachetime and doing
+		// odo catalog list components.
+		// TODO: Investigate this more.
+		helper.CmdShouldPass("odo", "preference", "set", "registrycachetime", "0")
 	})
 
 	// This is run after every Spec (It)
@@ -48,9 +53,9 @@ var _ = Describe("odo devfile catalog command tests", func() {
 			wantOutput := []string{
 				"Odo Devfile Components",
 				"NAME",
-				"springBoot",
-				"openLiberty",
-				"quarkus",
+				"java-springboot",
+				"java-openliberty",
+				"java-quarkus",
 				"DESCRIPTION",
 				"REGISTRY",
 				"DefaultDevfileRegistry",
@@ -65,11 +70,11 @@ var _ = Describe("odo devfile catalog command tests", func() {
 			wantOutput := []string{
 				"odo.dev/v1alpha1",
 				"devfileItems",
-				"openLiberty",
-				"springBoot",
+				"java-openliberty",
+				"java-springboot",
 				"nodejs",
-				"quarkus",
-				"maven",
+				"java-quarkus",
+				"java-maven",
 			}
 			helper.MatchAllInOutput(output, wantOutput)
 		})
@@ -81,8 +86,8 @@ var _ = Describe("odo devfile catalog command tests", func() {
 			output := helper.CmdShouldPass("odo", "catalog", "list", "components")
 			helper.MatchAllInOutput(output, []string{
 				"Odo Devfile Components",
-				"springBoot",
-				"quarkus",
+				"java-springboot",
+				"java-quarkus",
 			})
 			helper.CmdShouldPass("odo", "registry", "delete", "fake", "-f")
 		})
@@ -90,23 +95,21 @@ var _ = Describe("odo devfile catalog command tests", func() {
 
 	Context("When executing catalog describe component with a component name with a single project", func() {
 		It("should only give information about one project", func() {
-			output := helper.CmdShouldPass("odo", "catalog", "describe", "component", "openLiberty")
-			helper.MatchAllInOutput(output, []string{"location: https://github.com/odo-devfiles/openliberty-ex.git"})
+			output := helper.CmdShouldPass("odo", "catalog", "describe", "component", "java-openliberty")
+			Expect(output).To(MatchRegexp("origin: .+"))
 		})
 	})
 	Context("When executing catalog describe component with a component name with no starter projects", func() {
 		It("should print message that the component has no starter projects", func() {
-			output := helper.CmdShouldPass("odo", "catalog", "describe", "component", "maven")
-			helper.MatchAllInOutput(output, []string{"The Odo devfile component \"maven\" has no starter projects."})
+			output := helper.CmdShouldPass("odo", "catalog", "describe", "component", "java-maven")
+			helper.MatchAllInOutput(output, []string{"The Odo devfile component \"java-maven\" has no starter projects."})
 		})
 	})
 	Context("When executing catalog describe component with a component name with multiple components", func() {
 		It("should print multiple devfiles from different registries", func() {
 			helper.CmdShouldPass("odo", "registry", "add", registryName, addRegistryURL)
-			output := helper.CmdShouldPass("odo", "registry", "list")
-			helper.MatchAllInOutput(output, []string{registryName, addRegistryURL})
-			output = helper.CmdShouldPass("odo", "catalog", "describe", "component", "nodejs")
-			helper.MatchAllInOutput(output, []string{"name: nodejs-starter", "Registry: DefaultDevfileRegistry", "Registry: " + registryName})
+			output := helper.CmdShouldPass("odo", "catalog", "describe", "component", "nodejs")
+			helper.MatchAllInOutput(output, []string{"name: nodejs-starter", "Registry: " + registryName})
 		})
 	})
 	Context("When executing catalog describe component with a component name that does not have a devfile component", func() {
@@ -127,4 +130,14 @@ var _ = Describe("odo devfile catalog command tests", func() {
 			helper.MatchAllInOutput(output, []string{"accepts 1 arg(s), received 0"})
 		})
 	})
+
+	Context("When executing catalog list components with experimental mode set to true", func() {
+		It("should prove that nodejs is present in both S2I Component list and Devfile Component list", func() {
+			output := helper.CmdShouldPass("odo", "catalog", "list", "components", "-o", "json")
+			cmpName := []string{"nodejs"}
+			err := utils.VerifyCatalogListComponent(output, cmpName)
+			Expect(err).Should(BeNil())
+		})
+	})
+
 })

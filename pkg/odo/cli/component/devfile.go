@@ -3,9 +3,11 @@ package component
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/openshift/odo/pkg/devfile/parser"
+	"github.com/openshift/odo/pkg/devfile"
+	"github.com/openshift/odo/pkg/devfile/adapters"
 	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/machineoutput"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
@@ -13,7 +15,6 @@ import (
 	"github.com/openshift/odo/pkg/util"
 	"github.com/pkg/errors"
 
-	"github.com/openshift/odo/pkg/devfile/adapters"
 	"github.com/openshift/odo/pkg/devfile/adapters/common"
 	"github.com/openshift/odo/pkg/devfile/adapters/kubernetes"
 	"github.com/openshift/odo/pkg/log"
@@ -33,6 +34,18 @@ The behaviour of this feature is subject to change as development for this
 feature progresses.
 */
 
+// Constants for devfile component
+const (
+	devFile = "devfile.yaml"
+)
+
+// DevfilePath is the devfile path that is used by odo,
+// which means odo can:
+// 1. Directly use the devfile in DevfilePath
+// 2. Download devfile from registry to DevfilePath then use the devfile in DevfilePath
+// 3. Copy user's own devfile (path is specified via --devfile flag) to DevfilePath then use the devfile in DevfilePath
+var DevfilePath = filepath.Join(LocalDirectoryDefaultLocation, devFile)
+
 // DevfilePush has the logic to perform the required actions for a given devfile
 func (po *PushOptions) DevfilePush() error {
 
@@ -50,20 +63,28 @@ func (po *PushOptions) DevfilePush() error {
 		os.Exit(1)
 	}
 
-	return err
-}
-
-func (po *PushOptions) devfilePushInner() (err error) {
-	// Parse devfile and validate
-	devObj, err := parser.ParseAndValidate(po.DevfilePath)
 	if err != nil {
 		return err
 	}
 
-	componentName, err := getComponentName(po.componentContext)
-	if err != nil {
-		return errors.Wrap(err, "unable to get component name")
+	// push is successful, save the runMode used
+	runMode := envinfo.Run
+	if po.debugRun {
+		runMode = envinfo.Debug
 	}
+
+	return po.EnvSpecificInfo.SetRunMode(runMode)
+}
+
+func (po *PushOptions) devfilePushInner() (err error) {
+
+	// Parse devfile and validate
+	devObj, err := devfile.ParseAndValidate(po.DevfilePath)
+	if err != nil {
+		return err
+	}
+
+	componentName := po.EnvSpecificInfo.GetName()
 
 	// Set the source path to either the context or current working directory (if context not set)
 	po.sourcePath, err = util.GetAbsPath(po.componentContext)
@@ -87,11 +108,11 @@ func (po *PushOptions) devfilePushInner() (err error) {
 		platformContext = kc
 	}
 
-	devfileHandler, err := adapters.NewComponentAdapter(componentName, po.componentContext, devObj, platformContext)
-
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, po.componentContext, po.Application, devObj, platformContext)
 	if err != nil {
 		return err
 	}
+
 	pushParams := common.PushParameters{
 		Path:            po.sourcePath,
 		IgnoredFiles:    po.ignores,
@@ -123,39 +144,169 @@ func (po *PushOptions) devfilePushInner() (err error) {
 	return
 }
 
-// Get component name from env.yaml file
-func getComponentName(context string) (string, error) {
-	var dir string
-	var err error
-	if context == "" {
-		dir, err = os.Getwd()
-		if err != nil {
-			return "", err
-		}
-	} else {
-		dir = context
+//DevfileDeploy
+func (do *DeployOptions) DevfileDeploy() (err error) {
+	componentName := do.EnvSpecificInfo.GetName()
+
+	// Set the source path to either the context or current working directory (if context not set)
+	do.sourcePath, err = util.GetAbsPath(do.componentContext)
+	if err != nil {
+		return errors.Wrap(err, "unable to get source path")
 	}
 
-	envInfo, err := envinfo.NewEnvSpecificInfo(dir)
+	// Apply ignore information
+	err = genericclioptions.ApplyIgnore(&do.ignores, do.sourcePath)
 	if err != nil {
-		return "", err
+		return errors.Wrap(err, "unable to apply ignore information")
 	}
-	componentName := envInfo.GetName()
-	return componentName, nil
+
+	kubeContext := kubernetes.KubernetesContext{
+		Namespace: do.namespace,
+	}
+
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, do.componentContext, do.Application, do.devObj, kubeContext)
+	if err != nil {
+		return err
+	}
+
+	buildParams := common.BuildParameters{
+		Path:            do.sourcePath,
+		Tag:             do.tag,
+		DockerfileBytes: do.DockerfileBytes,
+		EnvSpecificInfo: *do.EnvSpecificInfo,
+	}
+
+	log.Infof("\nBuilding component %s", componentName)
+	// Build image for the component
+	err = devfileHandler.Build(buildParams)
+	if err != nil {
+		log.Errorf(
+			"Failed to build component with name %s.\nError: %v",
+			componentName,
+			err,
+		)
+		os.Exit(1)
+	}
+
+	deployParams := common.DeployParameters{
+		EnvSpecificInfo: *do.EnvSpecificInfo,
+		Tag:             do.tag,
+		ManifestSource:  do.ManifestSource,
+		DeploymentPort:  do.DeploymentPort,
+	}
+
+	warnIfURLSInvalid(do.EnvSpecificInfo.GetURL())
+
+	log.Infof("\nDeploying component %s", componentName)
+	// Deploy the application
+	err = devfileHandler.Deploy(deployParams)
+	if err != nil {
+		log.Errorf(
+			"Failed to deploy application with name %s.\nError: %v",
+			componentName,
+			err,
+		)
+		os.Exit(1)
+	}
+
+	return nil
+}
+
+// DevfileComponentDelete deletes the devfile component
+func (ddo *DeployDeleteOptions) DevfileDeployDelete() error {
+	// Parse devfile
+	devObj, err := devfile.ParseAndValidate(ddo.DevfilePath)
+	if err != nil {
+		return err
+	}
+
+	componentName := ddo.EnvSpecificInfo.GetName()
+	componentName = componentName + "-deploy"
+
+	kc := kubernetes.KubernetesContext{
+		Namespace: ddo.namespace,
+	}
+
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, ddo.componentContext, ddo.Application, devObj, kc)
+	if err != nil {
+		return err
+	}
+
+	spinner := log.Spinner(fmt.Sprintf("Deleting deployed devfile component %s", componentName))
+	defer spinner.End(false)
+
+	manifestErr := devfileHandler.DeployDelete(ddo.ManifestSource)
+	if manifestErr != nil && strings.Contains(manifestErr.Error(), "as component was not found") {
+		log.Warning(manifestErr.Error())
+		err = os.Remove(ddo.ManifestPath)
+		if err != nil {
+			return err
+		}
+		spinner.End(false)
+		log.Success(ddo.ManifestPath + " deleted. Exiting gracefully :)")
+		return nil
+	} else if manifestErr != nil {
+		err = os.Remove(ddo.ManifestPath)
+		return err
+	}
+
+	err = os.Remove(ddo.ManifestPath)
+	if err != nil {
+		return err
+	}
+
+	spinner.End(true)
+	log.Successf("Successfully deleted component")
+	return nil
+}
+
+// DevfileComponentLog fetch and display log from devfile components
+func (lo LogOptions) DevfileComponentLog() error {
+	// Parse devfile
+	devObj, err := devfile.ParseAndValidate(lo.devfilePath)
+	if err != nil {
+		return err
+	}
+	componentName := lo.Context.EnvSpecificInfo.GetName()
+
+	var platformContext interface{}
+	if pushtarget.IsPushTargetDocker() {
+		platformContext = nil
+	} else {
+		kc := kubernetes.KubernetesContext{
+			Namespace: lo.KClient.Namespace,
+		}
+		platformContext = kc
+	}
+
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, lo.componentContext, lo.Application, devObj, platformContext)
+
+	if err != nil {
+		return err
+	}
+
+	// Start or update the component
+	rd, err := devfileHandler.Log(lo.logFollow, lo.debug)
+	if err != nil {
+		log.Errorf(
+			"Failed to log component with name %s.\nError: %v",
+			componentName,
+			err,
+		)
+		os.Exit(1)
+	}
+
+	return util.DisplayLog(lo.logFollow, rd, componentName)
 }
 
 // DevfileComponentDelete deletes the devfile component
 func (do *DeleteOptions) DevfileComponentDelete() error {
 	// Parse devfile and validate
-	devObj, err := parser.ParseAndValidate(do.devfilePath)
+	devObj, err := devfile.ParseAndValidate(do.devfilePath)
 	if err != nil {
 		return err
 	}
-
-	componentName, err := getComponentName(do.componentContext)
-	if err != nil {
-		return err
-	}
+	componentName := do.EnvSpecificInfo.GetName()
 
 	kc := kubernetes.KubernetesContext{
 		Namespace: do.namespace,
@@ -164,21 +315,33 @@ func (do *DeleteOptions) DevfileComponentDelete() error {
 	labels := map[string]string{
 		"component": componentName,
 	}
-	devfileHandler, err := adapters.NewComponentAdapter(componentName, do.componentContext, devObj, kc)
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, do.componentContext, do.Application, devObj, kc)
 	if err != nil {
 		return err
 	}
 
-	spinner := log.Spinner(fmt.Sprintf("Deleting devfile component %s", componentName))
-	defer spinner.End(false)
+	return devfileHandler.Delete(labels, do.show)
+}
 
-	err = devfileHandler.Delete(labels)
+// RunTestCommand runs the specific test command in devfile
+func (to *TestOptions) RunTestCommand() error {
+	componentName := to.Context.EnvSpecificInfo.GetName()
+
+	var platformContext interface{}
+	if pushtarget.IsPushTargetDocker() {
+		platformContext = nil
+	} else {
+		kc := kubernetes.KubernetesContext{
+			Namespace: to.KClient.Namespace,
+		}
+		platformContext = kc
+	}
+
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, to.componentContext, to.Application, to.devObj, platformContext)
 	if err != nil {
 		return err
 	}
-	spinner.End(true)
-	log.Successf("Successfully deleted component")
-	return nil
+	return devfileHandler.Test(to.commandName, to.show)
 }
 
 func warnIfURLSInvalid(url []envinfo.EnvInfoURL) {
@@ -204,4 +367,26 @@ func warnIfURLSInvalid(url []envinfo.EnvInfoURL) {
 	} else if !pushtarget.IsPushTargetDocker() && !kubeURLExists && dockerURLExists {
 		log.Warningf("Found %v defined for Docker, but no valid URLs for Kubernetes.", urlOutput)
 	}
+}
+
+// DevfileComponentExec executes the given user command inside the component
+func (eo *ExecOptions) DevfileComponentExec(command []string) error {
+	// Parse devfile
+	devObj, err := devfile.ParseAndValidate(eo.devfilePath)
+	if err != nil {
+		return err
+	}
+
+	componentName := eo.componentOptions.EnvSpecificInfo.GetName()
+
+	kc := kubernetes.KubernetesContext{
+		Namespace: eo.namespace,
+	}
+
+	devfileHandler, err := adapters.NewComponentAdapter(componentName, eo.componentContext, eo.componentOptions.Application, devObj, kc)
+	if err != nil {
+		return err
+	}
+
+	return devfileHandler.Exec(command)
 }

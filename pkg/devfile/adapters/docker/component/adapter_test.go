@@ -41,20 +41,23 @@ func TestPush(t *testing.T) {
 		ForceBuild:        false,
 	}
 
-	execCommands := []versionsCommon.Exec{
+	execCommands := []versionsCommon.DevfileCommand{
 		{
-			CommandLine: command,
-			Component:   component,
-			Group: &versionsCommon.Group{
-				Kind: versionsCommon.RunCommandGroupType,
+			Exec: &versionsCommon.Exec{
+				CommandLine: command,
+				Component:   component,
+				Group: &versionsCommon.Group{
+					Kind: versionsCommon.RunCommandGroupType,
+				},
+				WorkingDir: workDir,
 			},
-			WorkingDir: workDir,
 		},
 	}
 	validComponents := []versionsCommon.DevfileComponent{
 		{
+			Name: component,
 			Container: &versionsCommon.Container{
-				Name: component,
+				Image: "image",
 			},
 		},
 	}
@@ -91,9 +94,9 @@ func TestPush(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
-					Components:   tt.components,
-					ExecCommands: execCommands,
+				Data: &testingutil.TestDevfileData{
+					Components: tt.components,
+					Commands:   execCommands,
 				},
 			}
 
@@ -121,6 +124,162 @@ func TestPush(t *testing.T) {
 
 }
 
+func TestDockerTest(t *testing.T) {
+
+	testComponentName := "test"
+	fakeClient := lclient.FakeNew()
+	fakeErrorClient := lclient.FakeErrorNew()
+
+	command := "ls -la"
+	component := "alias1"
+	workDir := "/root"
+	id := "testcmd"
+
+	// create a temp dir for the file indexer
+	directory, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Errorf("TestPush error: error creating temporary directory for the indexer: %v", err)
+	}
+
+	validComponents := []versionsCommon.DevfileComponent{
+		{
+			Name: component,
+			Container: &versionsCommon.Container{
+				Image: "image",
+			},
+		},
+	}
+
+	tests := []struct {
+		name          string
+		components    []versionsCommon.DevfileComponent
+		componentType versionsCommon.DevfileComponentType
+		client        *lclient.Client
+		execCommands  []versionsCommon.DevfileCommand
+		wantErr       bool
+	}{
+		{
+			name:         "Case 1: Invalid devfile",
+			components:   validComponents,
+			execCommands: []versionsCommon.DevfileCommand{},
+			client:       fakeClient,
+			wantErr:      true,
+		},
+		{
+			name:       "Case 2: Valid devfile",
+			components: validComponents,
+			client:     fakeClient,
+			execCommands: []versionsCommon.DevfileCommand{
+				{
+					Id: id,
+					Exec: &versionsCommon.Exec{
+						CommandLine: command,
+						Component:   component,
+						Group: &versionsCommon.Group{
+							Kind: versionsCommon.TestCommandGroupType,
+						},
+						WorkingDir: workDir,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:       "Case 3: Valid devfile, docker client error",
+			components: validComponents,
+			client:     fakeErrorClient,
+			wantErr:    true,
+		},
+		{
+			name:       "Case 4: No valid containers",
+			components: []versionsCommon.DevfileComponent{},
+			execCommands: []versionsCommon.DevfileCommand{
+				{
+					Id: id,
+					Exec: &versionsCommon.Exec{
+						CommandLine: command,
+						Component:   component,
+						Group: &versionsCommon.Group{
+							Kind: versionsCommon.TestCommandGroupType,
+						},
+						WorkingDir: workDir,
+					},
+				},
+			},
+			client:  fakeClient,
+			wantErr: true,
+		},
+		{
+			name:       "Case 5: Invalid command",
+			components: []versionsCommon.DevfileComponent{},
+			execCommands: []versionsCommon.DevfileCommand{
+				{
+					Id: id,
+					Exec: &versionsCommon.Exec{
+						CommandLine: "",
+						Component:   component,
+						Group: &versionsCommon.Group{
+							Kind: versionsCommon.TestCommandGroupType,
+						},
+						WorkingDir: workDir,
+					},
+				},
+			},
+			client:  fakeClient,
+			wantErr: true,
+		},
+		{
+			name:       "Case 6: No valid command group",
+			components: []versionsCommon.DevfileComponent{},
+			execCommands: []versionsCommon.DevfileCommand{
+				{
+					Id: id,
+					Exec: &versionsCommon.Exec{
+						CommandLine: command,
+						Component:   component,
+						Group: &versionsCommon.Group{
+							Kind: versionsCommon.RunCommandGroupType,
+						},
+						WorkingDir: workDir,
+					},
+				},
+			},
+			client:  fakeClient,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			devObj := devfileParser.DevfileObj{
+				Data: &testingutil.TestDevfileData{
+					Components: tt.components,
+					Commands:   tt.execCommands,
+				},
+			}
+
+			adapterCtx := adaptersCommon.AdapterContext{
+				ComponentName: testComponentName,
+				Devfile:       devObj,
+			}
+
+			componentAdapter := New(adapterCtx, *tt.client)
+			err := componentAdapter.Test(id, false)
+
+			// Checks for unexpected error cases
+			if !tt.wantErr == (err != nil) {
+				t.Errorf("component adapter create unexpected error %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+
+	// Remove the temp dir created for the file indexer
+	err = os.RemoveAll(directory)
+	if err != nil {
+		t.Errorf("TestTest error: error deleting the temp dir %s", directory)
+	}
+
+}
+
 func TestDoesComponentExist(t *testing.T) {
 	fakeClient := lclient.FakeNew()
 	fakeErrorClient := lclient.FakeErrorNew()
@@ -132,43 +291,56 @@ func TestDoesComponentExist(t *testing.T) {
 		componentName    string
 		getComponentName string
 		want             bool
+		wantErr          bool
 	}{
 		{
 			name:   "Case 1: Valid component name",
 			client: fakeClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
-				testingutil.GetFakeComponent("alias2"),
+				testingutil.GetFakeContainerComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias2"),
 			},
 			componentName:    "golang",
 			getComponentName: "golang",
 			want:             true,
+			wantErr:          false,
 		},
 		{
 			name:   "Case 2: Non-existent component name",
 			client: fakeClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias1"),
 			},
 			componentName:    "test",
 			getComponentName: "fake-component",
 			want:             false,
+			wantErr:          false,
 		},
 		{
-			name:   "Case 3: Docker client error",
+			name:             "Case 3: Container and devfile component mismatch",
+			componentName:    "test",
+			getComponentName: "golang",
+			client:           fakeClient,
+			components:       []common.DevfileComponent{},
+			want:             true,
+			wantErr:          true,
+		},
+		{
+			name:   "Case 4: Docker client error",
 			client: fakeErrorClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias1"),
 			},
 			componentName:    "test",
 			getComponentName: "fake-component",
 			want:             false,
+			wantErr:          true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: tt.components,
 				},
 			}
@@ -181,9 +353,13 @@ func TestDoesComponentExist(t *testing.T) {
 			componentAdapter := New(adapterCtx, *tt.client)
 
 			// Verify that a component with the specified name exists
-			componentExists := componentAdapter.DoesComponentExist(tt.getComponentName)
-			if componentExists != tt.want {
+			componentExists, err := componentAdapter.DoesComponentExist(tt.getComponentName)
+			if !tt.wantErr && err != nil {
+				t.Errorf("TestDoesComponentExist error, unexpected error - %v", err)
+			} else if !tt.wantErr && componentExists != tt.want {
 				t.Errorf("expected %v, actual %v", tt.want, componentExists)
+			} else if tt.wantErr && tt.want != componentExists {
+				t.Errorf("expected %v, wanted %v, err %v", componentExists, tt.want, err)
 			}
 
 		})
@@ -227,7 +403,7 @@ func TestAdapterDelete(t *testing.T) {
 			}},
 			componentName:   "component",
 			componentExists: false,
-			wantErr:         true,
+			wantErr:         false,
 		},
 	}
 	for _, tt := range tests {
@@ -240,7 +416,7 @@ func TestAdapterDelete(t *testing.T) {
 			defer ctrl.Finish()
 
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: []versionsCommon.DevfileComponent{},
 				},
 			}
@@ -256,10 +432,7 @@ func TestAdapterDelete(t *testing.T) {
 
 			fkclient, mockDockerClient := lclient.FakeNewMockClient(ctrl)
 
-			a := Adapter{
-				Client:         *fkclient,
-				AdapterContext: adapterCtx,
-			}
+			a := New(adapterCtx, *fkclient)
 
 			labeledContainers := []types.Container{}
 
@@ -304,7 +477,7 @@ func TestAdapterDelete(t *testing.T) {
 				}
 			}
 
-			if err := a.Delete(tt.args.labels); (err != nil) != tt.wantErr {
+			if err := a.Delete(tt.args.labels, false); (err != nil) != tt.wantErr {
 				t.Errorf("Delete() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
@@ -617,7 +790,7 @@ func TestAdapterDeleteVolumes(t *testing.T) {
 			defer ctrl.Finish()
 
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: []versionsCommon.DevfileComponent{},
 				},
 			}
@@ -629,10 +802,7 @@ func TestAdapterDeleteVolumes(t *testing.T) {
 
 			fkclient, mockDockerClient := lclient.FakeNewMockClient(ctrl)
 
-			a := Adapter{
-				Client:         *fkclient,
-				AdapterContext: adapterCtx,
-			}
+			a := New(adapterCtx, *fkclient)
 
 			arg := map[string]string{
 				"component": componentName,
@@ -650,7 +820,7 @@ func TestAdapterDeleteVolumes(t *testing.T) {
 				mockDockerClient.EXPECT().VolumeRemove(gomock.Any(), deleteExpected, gomock.Any()).Return(nil)
 			}
 
-			err := a.Delete(arg)
+			err := a.Delete(arg, false)
 			if err != nil {
 				t.Errorf("Delete() unexpected error = %v", err)
 			}

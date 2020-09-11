@@ -9,10 +9,13 @@ import (
 	"sync"
 
 	"github.com/openshift/odo/pkg/preference"
+	"github.com/zalando/go-keyring"
 
 	imagev1 "github.com/openshift/api/image/v1"
 	"github.com/openshift/odo/pkg/log"
 	"github.com/openshift/odo/pkg/occlient"
+
+	registryUtil "github.com/openshift/odo/pkg/odo/cli/registry/util"
 	"github.com/openshift/odo/pkg/util"
 	"github.com/pkg/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,8 +28,8 @@ const (
 
 // GetDevfileRegistries gets devfile registries from preference file,
 // if registry name is specified return the specific registry, otherwise return all registries
-func GetDevfileRegistries(registryName string) (map[string]Registry, error) {
-	devfileRegistries := make(map[string]Registry)
+func GetDevfileRegistries(registryName string) ([]Registry, error) {
+	var devfileRegistries []Registry
 
 	cfg, err := preference.New()
 	if err != nil {
@@ -35,20 +38,27 @@ func GetDevfileRegistries(registryName string) (map[string]Registry, error) {
 
 	hasName := len(registryName) != 0
 	if cfg.OdoSettings.RegistryList != nil {
-		for _, registry := range *cfg.OdoSettings.RegistryList {
+		registryList := *cfg.OdoSettings.RegistryList
+		// Loop backwards here to ensure the registry display order is correct (display latest newly added registry firstly)
+		for i := len(registryList) - 1; i >= 0; i-- {
+			registry := registryList[i]
 			if hasName {
 				if registryName == registry.Name {
-					devfileRegistries[registry.Name] = Registry{
-						Name: registry.Name,
-						URL:  registry.URL,
+					reg := Registry{
+						Name:   registry.Name,
+						URL:    registry.URL,
+						Secure: registry.Secure,
 					}
+					devfileRegistries = append(devfileRegistries, reg)
 					return devfileRegistries, nil
 				}
 			} else {
-				devfileRegistries[registry.Name] = Registry{
-					Name: registry.Name,
-					URL:  registry.URL,
+				reg := Registry{
+					Name:   registry.Name,
+					URL:    registry.URL,
+					Secure: registry.Secure,
 				}
+				devfileRegistries = append(devfileRegistries, reg)
 			}
 		}
 	} else {
@@ -102,7 +112,23 @@ func getRegistryDevfiles(registry Registry) ([]DevfileComponentType, error) {
 	}
 	registry.URL = URL
 	indexLink := registry.URL + indexPath
-	jsonBytes, err := util.HTTPGetRequest(indexLink)
+	request := util.HTTPRequestParams{
+		URL: indexLink,
+	}
+	if registryUtil.IsSecure(registry.Name) {
+		token, err := keyring.Get(util.CredentialPrefix+registry.Name, "default")
+		if err != nil {
+			return nil, errors.Wrap(err, "Unable to get secure registry credential from keyring")
+		}
+		request.Token = token
+	}
+
+	cfg, err := preference.New()
+	if err != nil {
+		return nil, err
+	}
+
+	jsonBytes, err := util.HTTPGetRequest(request, cfg.GetRegistryCacheTime())
 	if err != nil {
 		return nil, errors.Wrapf(err, "Unable to download the devfile index.json from %s", indexLink)
 	}
@@ -146,23 +172,32 @@ func ListDevfileComponents(registryName string) (DevfileComponentTypeList, error
 	// first retrieve the indices for each registry, concurrently
 	devfileIndicesMutex := &sync.Mutex{}
 	retrieveRegistryIndices := util.NewConcurrentTasks(len(catalogDevfileList.DevfileRegistries))
-	for _, reg := range catalogDevfileList.DevfileRegistries {
+
+	// The 2D slice index is the priority of the registry (highest priority has highest index)
+	// and the element is the devfile slice that belongs to the registry
+	registrySlice := make([][]DevfileComponentType, len(catalogDevfileList.DevfileRegistries))
+	for regPriority, reg := range catalogDevfileList.DevfileRegistries {
 		// Load the devfile registry index.json
-		registry := reg // needed to prevent the lambda from capturing the value
+		registry := reg                 // Needed to prevent the lambda from capturing the value
+		registryPriority := regPriority // Needed to prevent the lambda from capturing the value
 		retrieveRegistryIndices.Add(util.ConcurrentTask{ToRun: func(errChannel chan error) {
 			registryDevfiles, err := getRegistryDevfiles(registry)
 			if err != nil {
-				log.Warningf("Registry %s is not set up properly with error: %v", registry.Name, err)
+				log.Warningf("Registry %s is not set up properly with error: %v, please check the registry URL and credential (refer `odo registry update --help`)\n", registry.Name, err)
 				return
 			}
 
 			devfileIndicesMutex.Lock()
-			catalogDevfileList.Items = append(catalogDevfileList.Items, registryDevfiles...)
+			registrySlice[registryPriority] = registryDevfiles
 			devfileIndicesMutex.Unlock()
 		}})
 	}
 	if err := retrieveRegistryIndices.Run(); err != nil {
 		return *catalogDevfileList, err
+	}
+
+	for _, registryDevfiles := range registrySlice {
+		catalogDevfileList.Items = append(catalogDevfileList.Items, registryDevfiles...)
 	}
 
 	return *catalogDevfileList, nil
@@ -187,6 +222,7 @@ func ListComponents(client *occlient.Client) (ComponentTypeList, error) {
 		},
 		Items: catalogList,
 	}, nil
+
 }
 
 // SearchComponent searches for the component
@@ -382,7 +418,7 @@ func SliceSupportedTags(component ComponentType) ([]string, []string) {
 
 	// this makes sure that json marshal shows these lists as [] instead of null
 	supTag, unSupTag := []string{}, []string{}
-	tagMap := createImageTagMap(component.Spec.ImageStreamRef.Spec.Tags)
+	tagMap := createImageTagMap(component.Spec.ImageStreamTags)
 
 	for _, tag := range component.Spec.NonHiddenTags {
 		imageName := tagMap[tag]
@@ -453,16 +489,7 @@ func isSupportedImage(imgName string) bool {
 		"centos/nodejs-12-centos7:latest",
 		"rhscl/nodejs-10-rhel7:latest",
 		"rhscl/nodejs-12-rhel7:latest",
-		"bucharestgold/centos7-s2i-nodejs:latest",
-		"nodeshift/centos7-s2i-nodejs:latest",
-
-		// older images which we should remove soon
-		"rhoar-nodejs/nodejs-8:latest",
 		"rhoar-nodejs/nodejs-10:latest",
-		"bucharestgold/centos7-s2i-nodejs:8.x",
-		"bucharestgold/centos7-s2i-nodejs:10.x",
-		"centos/nodejs-8-centos7:latest",
-		"rhscl/nodejs-8-rhel7:latest",
 	}
 	for _, supImage := range supportedImages {
 		if supImage == imgName {
@@ -525,9 +552,9 @@ func getBuildersFromImageStreams(imageStreams []imagev1.ImageStream, imageStream
 					Namespace: imageStream.Namespace,
 				},
 				Spec: ComponentSpec{
-					AllTags:        allTags,
-					NonHiddenTags:  getAllNonHiddenTags(allTags, hiddenTags),
-					ImageStreamRef: imageStream,
+					AllTags:         allTags,
+					NonHiddenTags:   getAllNonHiddenTags(allTags, hiddenTags),
+					ImageStreamTags: imageStream.Spec.Tags,
 				},
 			}
 			builderImages = append(builderImages, catalogImage)

@@ -8,18 +8,28 @@ import (
 	adaptersCommon "github.com/openshift/odo/pkg/devfile/adapters/common"
 	devfileParser "github.com/openshift/odo/pkg/devfile/parser"
 	"github.com/openshift/odo/pkg/devfile/parser/data/common"
+	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/kclient"
 	"github.com/openshift/odo/pkg/util"
 
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog"
 )
 
+const (
+	containerNameMaxLen = 55
+)
+
 // ComponentExists checks whether a deployment by the given name exists
-func ComponentExists(client kclient.Client, name string) bool {
-	_, err := client.GetDeploymentByName(name)
-	return err == nil
+func ComponentExists(client kclient.Client, name string) (bool, error) {
+	deployment, err := client.GetDeploymentByName(name)
+	if kerrors.IsNotFound(err) {
+		klog.V(2).Infof("Deployment %s not found", name)
+		return false, nil
+	}
+	return deployment != nil, err
 }
 
 // ConvertEnvs converts environment variables from the devfile structure to kubernetes structure
@@ -41,8 +51,9 @@ func ConvertPorts(endpoints []common.Endpoint) ([]corev1.ContainerPort, error) {
 		name := strings.TrimSpace(util.GetDNS1123Name(strings.ToLower(endpoint.Name)))
 		name = util.TruncateString(name, 15)
 		for _, c := range containerPorts {
-			if c.ContainerPort == endpoint.TargetPort {
-				return nil, fmt.Errorf("Devfile contains multiple identical ports: %v", endpoint.TargetPort)
+			if c.Name == endpoint.Name {
+				// the name has to be unique within a single container since it is considered as the URL name
+				return nil, fmt.Errorf("devfile contains multiple endpoint entries with same name: %v", endpoint.Name)
 			}
 		}
 		containerPorts = append(containerPorts, corev1.ContainerPort{
@@ -56,43 +67,82 @@ func ConvertPorts(endpoints []common.Endpoint) ([]corev1.ContainerPort, error) {
 // GetContainers iterates through the components in the devfile and returns a slice of the corresponding containers
 func GetContainers(devfileObj devfileParser.DevfileObj) ([]corev1.Container, error) {
 	var containers []corev1.Container
-	for _, comp := range adaptersCommon.GetSupportedComponents(devfileObj.Data) {
+	for _, comp := range adaptersCommon.GetDevfileContainerComponents(devfileObj.Data) {
 		envVars := ConvertEnvs(comp.Container.Env)
 		resourceReqs := GetResourceReqs(comp)
 		ports, err := ConvertPorts(comp.Container.Endpoints)
 		if err != nil {
 			return nil, err
 		}
-		container := kclient.GenerateContainer(comp.Container.Name, comp.Container.Image, false, comp.Container.Command, comp.Container.Args, envVars, resourceReqs, ports)
+		container := kclient.GenerateContainer(comp.Name, comp.Container.Image, false, comp.Container.Command, comp.Container.Args, envVars, resourceReqs, ports)
 		for _, c := range containers {
 			for _, containerPort := range c.Ports {
 				for _, curPort := range container.Ports {
+					if curPort.Name == containerPort.Name {
+						// the name has to be unique across containers since it is considered as the URL name
+						return nil, fmt.Errorf("devfile contains multiple endpoint entries with same name: %v", containerPort.Name)
+					}
 					if curPort.ContainerPort == containerPort.ContainerPort {
-						return nil, fmt.Errorf("Devfile contains multiple identical ports: %v", containerPort.ContainerPort)
+						// the same TargetPort present in different containers
+						// because containers in a single pod shares the network namespace
+						return nil, fmt.Errorf("devfile contains multiple containers with same TargetPort: %v", containerPort.ContainerPort)
 					}
 				}
 			}
 		}
 
 		// If `mountSources: true` was set, add an empty dir volume to the container to sync the source to
+		// Sync to `Container.SourceMapping` if set
 		if comp.Container.MountSources {
+			var syncFolder, projectsRoot string
+			if comp.Container.SourceMapping != "" {
+				syncFolder = comp.Container.SourceMapping
+			} else if projectsRoot = adaptersCommon.GetComponentEnvVar(adaptersCommon.EnvProjectsRoot, comp.Container.Env); projectsRoot != "" {
+				syncFolder = projectsRoot
+			} else {
+				syncFolder = kclient.OdoSourceVolumeMount
+			}
+
 			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 				Name:      kclient.OdoSourceVolume,
-				MountPath: kclient.OdoSourceVolumeMount,
+				MountPath: syncFolder,
 			})
 
 			// only add the env if it is not set by the devfile
-			if !isEnvPresent(container.Env, adaptersCommon.EnvCheProjectsRoot) {
+			if projectsRoot == "" {
 				container.Env = append(container.Env,
 					corev1.EnvVar{
-						Name:  adaptersCommon.EnvCheProjectsRoot,
-						Value: kclient.OdoSourceVolumeMount,
+						Name:  adaptersCommon.EnvProjectsRoot,
+						Value: syncFolder,
 					})
 			}
 		}
 		containers = append(containers, *container)
 	}
 	return containers, nil
+}
+
+// GetPortExposure iterate through all endpoints and returns the highest exposure level of all TargetPort.
+// exposure level: public > internal > none
+func GetPortExposure(containerComponents []common.DevfileComponent) map[int32]common.ExposureType {
+	portExposureMap := make(map[int32]common.ExposureType)
+	for _, comp := range containerComponents {
+		for _, endpoint := range comp.Container.Endpoints {
+			// if exposure=public, no need to check for existence
+			if endpoint.Exposure == common.Public || endpoint.Exposure == "" {
+				portExposureMap[endpoint.TargetPort] = common.Public
+			} else if exposure, exist := portExposureMap[endpoint.TargetPort]; exist {
+				// if a container has multiple identical ports with different exposure levels, save the highest level in the map
+				if endpoint.Exposure == common.Internal && exposure == common.None {
+					portExposureMap[endpoint.TargetPort] = common.Internal
+				}
+			} else {
+				portExposureMap[endpoint.TargetPort] = endpoint.Exposure
+			}
+		}
+
+	}
+	return portExposureMap
 }
 
 // isEnvPresent checks if the env variable is present in an array of env variables
@@ -132,7 +182,7 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 			}
 
 			// Always mount the supervisord volume in the run component container
-			klog.V(4).Infof("Updating container %v with supervisord volume mounts", container.Name)
+			klog.V(2).Infof("Updating container %v with supervisord volume mounts", container.Name)
 			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 				Name:      adaptersCommon.SupervisordVolumeName,
 				MountPath: adaptersCommon.SupervisordMountPath,
@@ -142,16 +192,25 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 			// only if the env var is not set in the devfile
 			// This is done, so supervisord can use it in it's program
 			if !isEnvPresent(container.Env, adaptersCommon.EnvOdoCommandRun) {
-				klog.V(4).Infof("Updating container %v env with run command", container.Name)
+				klog.V(2).Infof("Updating container %v env with run command", container.Name)
+				var setEnvVariable, command string
+				for _, envVar := range runCommand.Exec.Env {
+					setEnvVariable = setEnvVariable + fmt.Sprintf("%v=\"%v\" ", envVar.Name, envVar.Value)
+				}
+				if setEnvVariable == "" {
+					command = runCommand.Exec.CommandLine
+				} else {
+					command = setEnvVariable + "&& " + runCommand.Exec.CommandLine
+				}
 				container.Env = append(container.Env,
 					corev1.EnvVar{
 						Name:  adaptersCommon.EnvOdoCommandRun,
-						Value: runCommand.Exec.CommandLine,
+						Value: command,
 					})
 			}
 
 			if !isEnvPresent(container.Env, adaptersCommon.EnvOdoCommandRunWorkingDir) && runCommand.Exec.WorkingDir != "" {
-				klog.V(4).Infof("Updating container %v env with run command's workdir", container.Name)
+				klog.V(2).Infof("Updating container %v env with run command's workdir", container.Name)
 				container.Env = append(container.Env,
 					corev1.EnvVar{
 						Name:  adaptersCommon.EnvOdoCommandRunWorkingDir,
@@ -176,7 +235,7 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 
 			if !foundMountPath {
 				// Always mount the supervisord volume in the debug component container
-				klog.V(4).Infof("Updating container %v with supervisord volume mounts", container.Name)
+				klog.V(2).Infof("Updating container %v with supervisord volume mounts", container.Name)
 				container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 					Name:      adaptersCommon.SupervisordVolumeName,
 					MountPath: adaptersCommon.SupervisordMountPath,
@@ -187,16 +246,25 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 			// only if the env var is not set in the devfile
 			// This is done, so supervisord can use it in it's program
 			if !isEnvPresent(container.Env, adaptersCommon.EnvOdoCommandDebug) {
-				klog.V(4).Infof("Updating container %v env with debug command", container.Name)
+				klog.V(2).Infof("Updating container %v env with debug command", container.Name)
+				var setEnvVariable, command string
+				for _, envVar := range debugCommand.Exec.Env {
+					setEnvVariable = setEnvVariable + fmt.Sprintf("%v=\"%v\" ", envVar.Name, envVar.Value)
+				}
+				if setEnvVariable == "" {
+					command = debugCommand.Exec.CommandLine
+				} else {
+					command = setEnvVariable + "&& " + debugCommand.Exec.CommandLine
+				}
 				container.Env = append(container.Env,
 					corev1.EnvVar{
 						Name:  adaptersCommon.EnvOdoCommandDebug,
-						Value: debugCommand.Exec.CommandLine,
+						Value: command,
 					})
 			}
 
 			if debugCommand.Exec.WorkingDir != "" && !isEnvPresent(container.Env, adaptersCommon.EnvOdoCommandDebugWorkingDir) {
-				klog.V(4).Infof("Updating container %v env with debug command's workdir", container.Name)
+				klog.V(2).Infof("Updating container %v env with debug command's workdir", container.Name)
 				container.Env = append(container.Env,
 					corev1.EnvVar{
 						Name:  adaptersCommon.EnvOdoCommandDebugWorkingDir,
@@ -205,7 +273,7 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 			}
 
 			if !isEnvPresent(container.Env, adaptersCommon.EnvDebugPort) {
-				klog.V(4).Infof("Updating container %v env with debug command's debugPort", container.Name)
+				klog.V(2).Infof("Updating container %v env with debug command's debugPort", container.Name)
 				container.Env = append(container.Env,
 					corev1.EnvVar{
 						Name:  adaptersCommon.EnvDebugPort,
@@ -223,7 +291,7 @@ func UpdateContainersWithSupervisord(devfileObj devfileParser.DevfileObj, contai
 func GetResourceReqs(comp common.DevfileComponent) corev1.ResourceRequirements {
 	reqs := corev1.ResourceRequirements{}
 	limits := make(corev1.ResourceList)
-	if &comp.Container.MemoryLimit != nil {
+	if comp.Container.MemoryLimit != "" {
 		memoryLimit, err := resource.ParseQuantity(comp.Container.MemoryLimit)
 		if err == nil {
 			limits[corev1.ResourceMemory] = memoryLimit
@@ -235,7 +303,105 @@ func GetResourceReqs(comp common.DevfileComponent) corev1.ResourceRequirements {
 
 // overrideContainerArgs overrides the container's entrypoint with supervisord
 func overrideContainerArgs(container *corev1.Container) {
-	klog.V(4).Infof("Updating container %v entrypoint with supervisord", container.Name)
+	klog.V(2).Infof("Updating container %v entrypoint with supervisord", container.Name)
 	container.Command = append(container.Command, adaptersCommon.SupervisordBinaryPath)
 	container.Args = append(container.Args, "-c", adaptersCommon.SupervisordConfFile)
+}
+
+func PluraliseKind(gvkKind string) (kind string) {
+	// gvkKind is normally a singular noun and we need to have the kind as a plural
+	// i.e. Deploment => Deployments
+	//      Route => Routes
+	//      Ingress => Ingresses
+	kind = strings.ToLower(gvkKind + "s")
+	if strings.HasSuffix(gvkKind, "s") {
+		kind = strings.ToLower(gvkKind + "es")
+	}
+	return kind
+}
+
+// UpdateContainerWithEnvFrom populates the runtime container with relevant
+// values for "EnvFrom" so that component can be linked with Operator backed
+// service
+func UpdateContainerWithEnvFrom(containers []corev1.Container, devfile devfileParser.DevfileObj, devfileRunCmd string, ei envinfo.EnvSpecificInfo) ([]corev1.Container, error) {
+	runCommand, err := adaptersCommon.GetRunCommand(devfile.Data, devfileRunCmd)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range containers {
+		c := &containers[i]
+		if c.Name == runCommand.Exec.Component {
+			c.EnvFrom = generateEnvFromSource(ei)
+		}
+	}
+
+	return containers, nil
+}
+
+func generateEnvFromSource(ei envinfo.EnvSpecificInfo) []corev1.EnvFromSource {
+
+	envFrom := []corev1.EnvFromSource{}
+
+	for _, link := range ei.GetLink() {
+		envFrom = append(envFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: link.Name,
+				},
+			},
+		})
+	}
+
+	return envFrom
+}
+
+// GetContainersMap gets the map of container name to containers
+func GetContainersMap(containers []corev1.Container) map[string]corev1.Container {
+	containersMap := make(map[string]corev1.Container)
+
+	for _, container := range containers {
+		containersMap[container.Name] = container
+	}
+	return containersMap
+}
+
+// AddPreStartEventInitContainer adds an init container for every preStart devfile event
+func AddPreStartEventInitContainer(podTemplateSpec *corev1.PodTemplateSpec, commandsMap map[string]common.DevfileCommand, eventCommands []string, containersMap map[string]corev1.Container) {
+
+	for i, commandName := range eventCommands {
+		if command, ok := commandsMap[commandName]; ok {
+			component := command.GetExecComponent()
+			commandLine := command.GetExecCommandLine()
+			workingDir := command.GetExecWorkingDir()
+
+			var cmdArr []string
+			if workingDir != "" {
+				// since we are using /bin/sh -c, the command needs to be within a single double quote instance, for example "cd /tmp && pwd"
+				cmdArr = []string{adaptersCommon.ShellExecutable, "-c", "cd " + workingDir + " && " + commandLine}
+			} else {
+				cmdArr = []string{adaptersCommon.ShellExecutable, "-c", commandLine}
+			}
+
+			// Get the container info for the given component
+			if container, ok := containersMap[component]; ok {
+				// override any container command and args with our event command cmdArr
+				container.Command = cmdArr
+				container.Args = []string{}
+
+				// Override the init container name since there cannot be two containers with the same
+				// name in a pod. This applies to pod containers and pod init containers. The convention
+				// for init container name here is, containername-eventname-<position of command in prestart events>
+				// If there are two events referencing the same devfile component, then we will have
+				// tools-event1-1 & tools-event2-3, for example. And if in the edge case, the same command is
+				// executed twice by preStart events, then we will have tools-event1-1 & tools-event1-2
+				initContainerName := fmt.Sprintf("%s-%s", container.Name, commandName)
+				initContainerName = util.TruncateString(initContainerName, containerNameMaxLen)
+				initContainerName = fmt.Sprintf("%s-%d", initContainerName, i+1)
+				container.Name = initContainerName
+
+				podTemplateSpec.Spec.InitContainers = append(podTemplateSpec.Spec.InitContainers, container)
+			}
+		}
+	}
 }

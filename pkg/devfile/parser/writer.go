@@ -2,6 +2,7 @@ package parser
 
 import (
 	"encoding/json"
+
 	"gopkg.in/yaml.v2"
 
 	"github.com/pkg/errors"
@@ -19,13 +20,13 @@ func (d *DevfileObj) WriteJsonDevfile() error {
 
 	// Write to devfile.json
 	fs := d.Ctx.GetFs()
-	err = fs.WriteFile(OutputDevfileJsonPath, jsonData, 0644)
+	err = fs.WriteFile(d.Ctx.GetAbsPath(), jsonData, 0644)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create devfile json file")
 	}
 
 	// Successful
-	klog.V(4).Infof("devfile json created at: '%s'", OutputDevfileJsonPath)
+	klog.V(2).Infof("devfile json created at: '%s'", OutputDevfileJsonPath)
 	return nil
 }
 
@@ -40,12 +41,12 @@ func (d *DevfileObj) WriteYamlDevfile() error {
 
 	// Write to devfile.yaml
 	fs := d.Ctx.GetFs()
-	err = fs.WriteFile(OutputDevfileYamlPath, yamlData, 0644)
+	err = fs.WriteFile(d.Ctx.GetAbsPath(), yamlData, 0644)
 	if err != nil {
 		return errors.Wrapf(err, "failed to create devfile yaml file")
 	}
 
 	// Successful
-	klog.V(4).Infof("devfile yaml created at: '%s'", OutputDevfileYamlPath)
+	klog.V(2).Infof("devfile yaml created at: '%s'", OutputDevfileYamlPath)
 	return nil
 }

@@ -9,15 +9,15 @@ install_mongo_operator() {
   apiVersion: operators.coreos.com/v1alpha1
   kind: Subscription
   metadata:
-    generation: 1
-    name: mongodb-enterprise
+    name: percona-server-mongodb-operator-certified
     namespace: openshift-operators
   spec:
     channel: stable
     installPlanApproval: Automatic
-    name: mongodb-enterprise
+    name: percona-server-mongodb-operator-certified
     source: certified-operators
     sourceNamespace: openshift-marketplace
+    startingCSV: percona-server-mongodb-operator.v1.4.0
 EOF
 }
 
@@ -35,6 +35,24 @@ install_etcd_operator(){
     name: etcd
     source: community-operators
     sourceNamespace: openshift-marketplace
+    startingCSV: etcdoperator.v0.9.4-clusterwide
+EOF
+}
+
+install_service_binding_operator(){
+  oc create -f - <<EOF
+  apiVersion: operators.coreos.com/v1alpha1
+  kind: Subscription
+  metadata:
+    name: service-binding-operator
+    namespace: openshift-operators
+  spec:
+    channel: alpha
+    installPlanApproval: Automatic
+    name: service-binding-operator
+    source: community-operators
+    sourceNamespace: openshift-marketplace
+    startingCSV: service-binding-operator.v0.1.1-364
 EOF
 }
 
@@ -59,6 +77,19 @@ do
         break
     else
         install_etcd_operator
+        count=`expr $count + 1`
+        sleep 15
+    fi
+done
+
+# install service-binding-operator
+count=0
+while [ "$count" -lt "5" ];
+do
+    if oc get csv -n openshift-operators | grep service-binding-operator; then
+        break
+    else
+        install_service_binding_operator
         count=`expr $count + 1`
         sleep 15
     fi

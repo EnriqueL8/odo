@@ -2,15 +2,17 @@ package component
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/openshift/odo/pkg/component"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
+	sbo "github.com/redhat-developer/service-binding-operator/pkg/apis/apps/v1alpha1"
 
-	appCmd "github.com/openshift/odo/pkg/odo/cli/application"
 	projectCmd "github.com/openshift/odo/pkg/odo/cli/project"
 	"github.com/openshift/odo/pkg/odo/util/completion"
+	"github.com/openshift/odo/pkg/util"
 
-	"github.com/openshift/odo/pkg/odo/util"
+	odoutil "github.com/openshift/odo/pkg/odo/util"
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/spf13/cobra"
@@ -63,12 +65,30 @@ odo link dh-postgresql-apb
 Now backend has 2 ENV variables it can use:
 DB_USER=luke
 DB_PASSWORD=secret`
+
+	linkExampleExperimental = ktemplates.Examples(`# Link the current component to the 'EtcdCluster' named 'myetcd'
+%[1]s EtcdCluster/myetcd
+	`)
+
+	linkLongDescExperimental = `Link component to an operator backed service
+
+If the source component is not provided, the current active component is assumed.
+
+For example:
+
+We have created a frontend application called 'frontend' using:
+odo create nodejs frontend
+
+If you wish to connect this nodejs based component to, for example, an EtcdCluster named 'myetcd' created from etcd Operator:
+odo link EtcdCluster/myetcd
+	`
 )
 
 // LinkOptions encapsulates the options for the odo link command
 type LinkOptions struct {
 	waitForTarget    bool
 	componentContext string
+
 	*commonLinkOptions
 }
 
@@ -76,13 +96,18 @@ type LinkOptions struct {
 func NewLinkOptions() *LinkOptions {
 	options := LinkOptions{}
 	options.commonLinkOptions = newCommonLinkOptions()
+	options.commonLinkOptions.sbr = &sbo.ServiceBindingRequest{}
 	return &options
 }
 
 // Complete completes LinkOptions after they've been created
 func (o *LinkOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
+	o.commonLinkOptions.devfilePath = filepath.Join(o.componentContext, DevfilePath)
+
 	err = o.complete(name, cmd, args)
-	o.operation = o.Client.LinkSecret
+	if !util.CheckPathExists(o.commonLinkOptions.devfilePath) {
+		o.operation = o.Client.LinkSecret
+	}
 	return err
 }
 
@@ -91,6 +116,11 @@ func (o *LinkOptions) Validate() (err error) {
 	err = o.validate(o.waitForTarget)
 	if err != nil {
 		return err
+	}
+
+	// Return if we are using Devfile, no need to validate anything else below
+	if util.CheckPathExists(o.commonLinkOptions.devfilePath) {
+		return
 	}
 
 	alreadyLinkedSecretNames, err := component.GetComponentLinkedSecretNames(o.Client, o.Component(), o.Application)
@@ -134,13 +164,19 @@ func NewCmdLink(name, fullName string) *cobra.Command {
 	linkCmd.PersistentFlags().BoolVarP(&o.wait, "wait", "w", false, "If enabled the link will return only when the component is fully running after the link is created")
 	linkCmd.PersistentFlags().BoolVar(&o.waitForTarget, "wait-for-target", false, "If enabled, the link command will wait for the service to be provisioned (has no effect when linking to a component)")
 
-	linkCmd.SetUsageTemplate(util.CmdUsageTemplate)
+	linkCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)
+
+	// Update the use / example / long to the Devfile description
+	linkCmd.Use = fmt.Sprintf("%s <service-type>/<service-name>", name)
+	linkCmd.Example = fmt.Sprintf(linkExampleExperimental, fullName)
+	linkCmd.Long = linkLongDescExperimental
+
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(linkCmd)
-	//Adding `--application` flag
-	appCmd.AddApplicationFlag(linkCmd)
+
 	//Adding `--component` flag
 	AddComponentFlag(linkCmd)
+
 	//Adding context flag
 	genericclioptions.AddContextFlag(linkCmd, &o.componentContext)
 

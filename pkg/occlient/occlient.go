@@ -16,14 +16,12 @@ import (
 
 	"github.com/olekukonko/tablewriter"
 
-	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	"k8s.io/klog"
 
 	"github.com/openshift/odo/pkg/config"
 	"github.com/openshift/odo/pkg/devfile/adapters/common"
 	"github.com/openshift/odo/pkg/log"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/openshift/odo/pkg/preference"
 	"github.com/openshift/odo/pkg/util"
 
@@ -58,7 +56,10 @@ import (
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -97,12 +98,8 @@ type CreateArgs struct {
 const (
 	failedEventCount                = 5
 	OcUpdateTimeout                 = 5 * time.Minute
-	OcBuildTimeout                  = 5 * time.Minute
 	OpenShiftNameSpace              = "openshift"
 	waitForComponentDeletionTimeout = 120 * time.Second
-
-	// timeout for getting the default service account
-	getDefaultServiceAccTimeout = 1 * time.Minute
 
 	// timeout for waiting for project deletion
 	waitForProjectDeletionTimeOut = 3 * time.Minute
@@ -153,6 +150,8 @@ const (
 	EnvS2IWorkingDir = "ODO_S2I_WORKING_DIR"
 
 	DefaultAppRootDir = "/opt/app-root"
+
+	DeployWaitTimeout = 30 * time.Second
 )
 
 // S2IPaths is a struct that will hold path to S2I scripts and the protocol indicating access to them, component source/binary paths, artifacts deployments directory
@@ -214,8 +213,13 @@ type Client struct {
 	routeClient          routeclientset.RouteV1Interface
 	userClient           userclientset.UserV1Interface
 	KubeConfig           clientcmd.ClientConfig
-	discoveryClient      discovery.DiscoveryClient
+	discoveryClient      discovery.DiscoveryInterface
 	Namespace            string
+	dynamicClient        dynamic.Interface
+}
+
+func (c *Client) SetDiscoveryInterface(client discovery.DiscoveryInterface) {
+	c.discoveryClient = client
 }
 
 // New creates a new client
@@ -285,7 +289,7 @@ func New() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.discoveryClient = *discoveryClient
+	client.discoveryClient = discoveryClient
 
 	namespace, _, err := client.KubeConfig.Namespace()
 	if err != nil {
@@ -293,6 +297,11 @@ func New() (*Client, error) {
 	}
 	client.Namespace = namespace
 
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	client.dynamicClient = dynamicClient
 	return &client, nil
 }
 
@@ -396,6 +405,31 @@ func (c *Client) GetPortsFromBuilderImage(componentType string) ([]string, error
 	return portList, nil
 }
 
+// RunBuildConfigWithBinary
+func (c *Client) RunBuildConfigWithBinaryInput(name string, r io.Reader) (*buildv1.Build, error) {
+	// TODO: investigate this issue
+	// Error: no kind is registered for the type v1.BinaryBuildRequestOptions in scheme "k8s.io/client-go/kubernetes/scheme/register.go:69"
+	// options := &buildv1.BinaryBuildRequestOptions{
+	// 	ObjectMeta: metav1.ObjectMeta{
+	// 		Name:      name,
+	// 		Namespace: c.Namespace,
+	// 	},
+	// }
+	result := &buildv1.Build{}
+	err := c.buildClient.RESTClient().
+		Post().
+		Namespace(c.Namespace).
+		Resource("buildconfigs").
+		Name(name).
+		SubResource("instantiatebinary").
+		Body(r).
+		//VersionedParams(options, scheme.ParameterCodec).
+		Do().
+		Into(result)
+
+	return result, err
+}
+
 // RunLogout logs out the current user from cluster
 func (c *Client) RunLogout(stdout io.Writer) error {
 	output, err := c.userClient.Users().Get("~", metav1.GetOptions{})
@@ -449,22 +483,22 @@ func isServerUp(server string) bool {
 	// before proceeding with default timeout
 	cfg, configReadErr := preference.New()
 	if configReadErr != nil {
-		klog.V(4).Info(errors.Wrap(configReadErr, "unable to read config file"))
+		klog.V(3).Info(errors.Wrap(configReadErr, "unable to read config file"))
 	} else {
 		ocRequestTimeout = time.Duration(cfg.GetTimeout()) * time.Second
 	}
 	address, err := util.GetHostWithPort(server)
 	if err != nil {
-		klog.V(4).Infof("Unable to parse url %s (%s)", server, err)
+		klog.V(3).Infof("Unable to parse url %s (%s)", server, err)
 	}
-	klog.V(4).Infof("Trying to connect to server %s", address)
+	klog.V(3).Infof("Trying to connect to server %s", address)
 	_, connectionError := net.DialTimeout("tcp", address, time.Duration(ocRequestTimeout))
 	if connectionError != nil {
-		klog.V(4).Info(errors.Wrap(connectionError, "unable to connect to server"))
+		klog.V(3).Info(errors.Wrap(connectionError, "unable to connect to server"))
 		return false
 	}
 
-	klog.V(4).Infof("Server %v is up", server)
+	klog.V(3).Infof("Server %v is up", server)
 	return true
 }
 
@@ -540,12 +574,12 @@ func (c *Client) CreateNewProject(projectName string, wait bool) error {
 				break
 			}
 			if prj, ok := val.Object.(*projectv1.Project); ok {
-				klog.V(4).Infof("Status of creation of project %s is %s", prj.Name, prj.Status.Phase)
+				klog.V(3).Infof("Status of creation of project %s is %s", prj.Name, prj.Status.Phase)
 				switch prj.Status.Phase {
 				//prj.Status.Phase can only be "Terminating" or "Active" or ""
 				case corev1.NamespaceActive:
 					if val.Type == watch.Added {
-						klog.V(4).Infof("Project %s now exists", prj.Name)
+						klog.V(3).Infof("Project %s now exists", prj.Name)
 						return nil
 					}
 					if val.Type == watch.Error {
@@ -556,39 +590,6 @@ func (c *Client) CreateNewProject(projectName string, wait bool) error {
 		}
 	}
 
-	return nil
-}
-
-// WaitForServiceAccountInNamespace waits for the given service account to be ready
-func (c *Client) WaitForServiceAccountInNamespace(namespace, serviceAccountName string) error {
-	if namespace == "" || serviceAccountName == "" {
-		return errors.New("namespace and serviceAccountName cannot be empty")
-	}
-	watcher, err := c.kubeClient.CoreV1().ServiceAccounts(namespace).Watch(metav1.SingleObject(metav1.ObjectMeta{Name: serviceAccountName}))
-	if err != nil {
-		return err
-	}
-
-	timeout := time.After(getDefaultServiceAccTimeout)
-	if watcher != nil {
-		defer watcher.Stop()
-		for {
-			select {
-			case val, ok := <-watcher.ResultChan():
-				if !ok {
-					break
-				}
-				if serviceAccount, ok := val.Object.(*corev1.ServiceAccount); ok {
-					if serviceAccount.Name == serviceAccountName {
-						klog.V(4).Infof("Status of creation of service account %s is ready", serviceAccount)
-						return nil
-					}
-				}
-			case <-timeout:
-				return errors.New("Timed out waiting for service to be ready")
-			}
-		}
-	}
 	return nil
 }
 
@@ -713,6 +714,7 @@ func isTagInImageStream(is imagev1.ImageStream, imageTag string) bool {
 // imagestream of required tag not found in current namespace, then searches openshift namespace.
 // If not found, error out. If imageNS is not empty string, then, the requested imageNS only is searched
 // for requested imagestream
+// if imageTag is empty string, then do not check for tag in the imagestream.
 func (c *Client) GetImageStream(imageNS string, imageName string, imageTag string) (*imagev1.ImageStream, error) {
 	var err error
 	var imageStream *imagev1.ImageStream
@@ -736,7 +738,7 @@ func (c *Client) GetImageStream(imageNS string, imageName string, imageTag strin
 		currentNSImageStream, e := c.imageClient.ImageStreams(currentProjectName).Get(imageName, metav1.GetOptions{})
 		if e != nil {
 			err = errors.Wrapf(e, "no match found for : %s in namespace %s", imageName, currentProjectName)
-		} else {
+		} else if imageTag != "" {
 			if isTagInImageStream(*currentNSImageStream, imageTag) {
 				return currentNSImageStream, nil
 			}
@@ -747,17 +749,13 @@ func (c *Client) GetImageStream(imageNS string, imageName string, imageTag strin
 		if e != nil {
 			// The image is not available in current Namespace.
 			err = errors.Wrapf(e, "no match found for : %s in namespace %s", imageName, OpenShiftNameSpace)
-		} else {
+		} else if imageTag != "" {
 			if isTagInImageStream(*openshiftNSImageStream, imageTag) {
 				return openshiftNSImageStream, nil
 			}
 		}
 		if e != nil && err != nil {
-			// Imagestream not found in openshift and current namespaces
-			if experimental.IsExperimentalModeEnabled() {
-				return nil, fmt.Errorf("component type %q not found", imageName)
-			}
-			return nil, err
+			return nil, fmt.Errorf("component type %q not found", imageName)
 		}
 
 		// Required tag not in openshift and current namespaces
@@ -772,8 +770,11 @@ func (c *Client) GetImageStream(imageNS string, imageName string, imageTag strin
 			err, "no match found for %s in namespace %s", imageName, imageNS,
 		)
 	}
-	if !isTagInImageStream(*imageStream, imageTag) {
-		return nil, fmt.Errorf("image stream %s with tag %s not found in %s namespaces", imageName, imageTag, currentProjectName)
+
+	if imageTag != "" {
+		if !isTagInImageStream(*imageStream, imageTag) {
+			return nil, fmt.Errorf("image stream %s with tag %s not found in %s namespaces", imageName, imageTag, currentProjectName)
+		}
 	}
 
 	return imageStream, nil
@@ -796,7 +797,7 @@ func (c *Client) GetImageStreamImage(imageStream *imagev1.ImageStream, imageTag 
 	for _, tag := range imageStream.Status.Tags {
 		// look for matching tag
 		if tag.Tag == imageTag {
-			klog.V(4).Infof("Found exact image tag match for %s:%s", imageName, imageTag)
+			klog.V(3).Infof("Found exact image tag match for %s:%s", imageName, imageTag)
 
 			if len(tag.Items) > 0 {
 				tagDigest := tag.Items[0].Image
@@ -850,7 +851,7 @@ func getAppRootVolumeName(dcName string) string {
 // inputPorts is the array containing the string port values
 // envVars is the array containing the string env var values
 func (c *Client) NewAppS2I(params CreateArgs, commonObjectMeta metav1.ObjectMeta) error {
-	klog.V(4).Infof("Using BuilderImage: %s", params.ImageName)
+	klog.V(3).Infof("Using BuilderImage: %s", params.ImageName)
 	imageNS, imageName, imageTag, _, err := ParseImageName(params.ImageName)
 	if err != nil {
 		return errors.Wrap(err, "unable to parse image name")
@@ -865,7 +866,7 @@ func (c *Client) NewAppS2I(params CreateArgs, commonObjectMeta metav1.ObjectMeta
 	*/
 
 	imageNS = imageStream.ObjectMeta.Namespace
-	klog.V(4).Infof("Using imageNS: %s", imageNS)
+	klog.V(3).Infof("Using imageNS: %s", imageNS)
 
 	imageStreamImage, err := c.GetImageStreamImage(imageStream, imageTag)
 	if err != nil {
@@ -1023,7 +1024,7 @@ func GetS2IMetaInfoFromBuilderImg(builderImage *imagev1.ImageStreamImage) (S2IPa
 
 	// If by any chance, labels attribute is nil(although ideally not the case for builder images), return
 	if dimdr.ContainerConfig.Labels == nil {
-		klog.V(4).Infof("No Labels found in %+v in builder image %+v", dimdr, builderImage)
+		klog.V(3).Infof("No Labels found in %+v in builder image %+v", dimdr, builderImage)
 		return S2IPaths{}, nil
 	}
 
@@ -1428,7 +1429,7 @@ func (c *Client) PatchCurrentDC(dc appsv1.DeploymentConfig, prePatchDCHandler dc
 		if errCurrent != nil || errUpdated != nil {
 			return errors.Wrapf(err, "unable to unmarshal dc")
 		}
-		klog.V(4).Infof("going to wait for new deployment roll out because updatedDc Spec.Template: %v doesn't match currentDc Spec.Template: %v", string(updatedDCBytes), string(currentDCBytes))
+		klog.V(3).Infof("going to wait for new deployment roll out because updatedDc Spec.Template: %v doesn't match currentDc Spec.Template: %v", string(updatedDCBytes), string(currentDCBytes))
 
 	}
 
@@ -1726,7 +1727,7 @@ func (c *Client) GetLatestBuildName(buildConfigName string) (string, error) {
 
 // StartBuild starts new build as it is, returns name of the build stat was started
 func (c *Client) StartBuild(name string) (string, error) {
-	klog.V(4).Infof("Build %s started.", name)
+	klog.V(3).Infof("Build %s started.", name)
 	buildRequest := buildv1.BuildRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -1736,16 +1737,16 @@ func (c *Client) StartBuild(name string) (string, error) {
 	if err != nil {
 		return "", errors.Wrapf(err, "unable to instantiate BuildConfig for %s", name)
 	}
-	klog.V(4).Infof("Build %s for BuildConfig %s triggered.", name, result.Name)
+	klog.V(3).Infof("Build %s for BuildConfig %s triggered.", name, result.Name)
 
 	return result.Name, nil
 }
 
 // WaitForBuildToFinish block and waits for build to finish. Returns error if build failed or was canceled.
-func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error {
+func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer, buildTimeout time.Duration) error {
 	// following indicates if we have already setup the following logic
 	following := false
-	klog.V(4).Infof("Waiting for %s  build to finish", buildName)
+	klog.V(3).Infof("Waiting for %s  build to finish", buildName)
 
 	// start a watch on the build resources and look for the given build name
 	w, err := c.buildClient.Builds(c.Namespace).Watch(metav1.ListOptions{
@@ -1755,7 +1756,7 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 		return errors.Wrapf(err, "unable to watch build")
 	}
 	defer w.Stop()
-	timeout := time.After(OcBuildTimeout)
+	timeout := time.After(buildTimeout)
 	for {
 		select {
 		// when a event is received regarding the given buildName
@@ -1765,11 +1766,11 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 			}
 			// cast the object returned to a build object and check the phase of the build
 			if e, ok := val.Object.(*buildv1.Build); ok {
-				klog.V(4).Infof("Status of %s build is %s", e.Name, e.Status.Phase)
+				klog.V(3).Infof("Status of %s build is %s", e.Name, e.Status.Phase)
 				switch e.Status.Phase {
 				case buildv1.BuildPhaseComplete:
 					// the build is completed thus return
-					klog.V(4).Infof("Build %s completed.", e.Name)
+					klog.V(3).Infof("Build %s completed.", e.Name)
 					return nil
 				case buildv1.BuildPhaseFailed, buildv1.BuildPhaseCancelled, buildv1.BuildPhaseError:
 					// the build failed/got cancelled/error occurred thus return with error
@@ -1779,7 +1780,7 @@ func (c *Client) WaitForBuildToFinish(buildName string, stdout io.Writer) error 
 					if !following {
 						// setting following to true as we need to set it up only once
 						following = true
-						err := c.FollowBuildLog(buildName, stdout)
+						err := c.FollowBuildLog(buildName, stdout, buildTimeout)
 						if err != nil {
 							return err
 						}
@@ -1827,7 +1828,11 @@ func (c *Client) WaitAndGetDC(name string, desiredRevision int64, timeout time.D
 				break
 			}
 			if e, ok := val.Object.(*appsv1.DeploymentConfig); ok {
-
+				for _, cond := range e.Status.Conditions {
+					// using this just for debugging message, so ignoring error on purpose
+					jsonCond, _ := json.Marshal(cond)
+					klog.V(3).Infof("DeploymentConfig Condition: %s", string(jsonCond))
+				}
 				// If the annotation has been updated, let's exit
 				if waitCond(e, desiredRevision) {
 					return e, nil
@@ -1854,7 +1859,7 @@ func (c *Client) CollectEvents(selector string, events map[string]corev1.Event, 
 	for {
 		select {
 		case <-quit:
-			klog.V(4).Info("Quitting collect events")
+			klog.V(3).Info("Quitting collect events")
 			return
 		case val, ok := <-eventWatcher.ResultChan():
 			mu.Lock()
@@ -1870,7 +1875,7 @@ func (c *Client) CollectEvents(selector string, events map[string]corev1.Event, 
 					if e.Count >= failedEventCount {
 						newEvent := e
 						(events)[e.Name] = *newEvent
-						klog.V(4).Infof("Warning Event: Count: %d, Reason: %s, Message: %s", e.Count, e.Reason, e.Message)
+						klog.V(3).Infof("Warning Event: Count: %d, Reason: %s, Message: %s", e.Count, e.Reason, e.Message)
 						// Change the spinner message to show the warning
 						spinner.WarningStatus(fmt.Sprintf("WARNING x%d: %s", e.Count, e.Reason))
 					}
@@ -1894,12 +1899,12 @@ func (c *Client) WaitAndGetPod(selector string, desiredPhase corev1.PodPhase, wa
 	pushTimeout := preference.DefaultPushTimeout * time.Second
 	cfg, configReadErr := preference.New()
 	if configReadErr != nil {
-		klog.V(4).Info(errors.Wrap(configReadErr, "unable to read config file"))
+		klog.V(3).Info(errors.Wrap(configReadErr, "unable to read config file"))
 	} else {
 		pushTimeout = time.Duration(cfg.GetPushTimeout()) * time.Second
 	}
 
-	klog.V(4).Infof("Waiting for %s pod", selector)
+	klog.V(3).Infof("Waiting for %s pod", selector)
 	spinner := log.Spinner(waitMessage)
 	defer spinner.End(false)
 
@@ -1923,10 +1928,20 @@ func (c *Client) WaitAndGetPod(selector string, desiredPhase corev1.PodPhase, wa
 				break loop
 			}
 			if e, ok := val.Object.(*corev1.Pod); ok {
-				klog.V(4).Infof("Status of %s pod is %s", e.Name, e.Status.Phase)
+				klog.V(3).Infof("Status of %s pod is %s", e.Name, e.Status.Phase)
+				for _, cond := range e.Status.Conditions {
+					// using this just for debugging message, so ignoring error on purpose
+					jsonCond, _ := json.Marshal(cond)
+					klog.V(3).Infof("Pod Conditions: %s", string(jsonCond))
+				}
+				for _, status := range e.Status.ContainerStatuses {
+					// using this just for debugging message, so ignoring error on purpose
+					jsonStatus, _ := json.Marshal(status)
+					klog.V(3).Infof("Container Status: %#v", jsonStatus)
+				}
 				switch e.Status.Phase {
 				case desiredPhase:
-					klog.V(4).Infof("Pod %s is %v", e.Name, desiredPhase)
+					klog.V(3).Infof("Pod %s is %v", e.Name, desiredPhase)
 					podChannel <- e
 					break loop
 				case corev1.PodFailed, corev1.PodUnknown:
@@ -1992,7 +2007,7 @@ See below for a list of failed events that occured more than %d times during dep
 
 // WaitAndGetSecret blocks and waits until the secret is available
 func (c *Client) WaitAndGetSecret(name string, namespace string) (*corev1.Secret, error) {
-	klog.V(4).Infof("Waiting for secret %s to become available", name)
+	klog.V(3).Infof("Waiting for secret %s to become available", name)
 
 	w, err := c.kubeClient.CoreV1().Secrets(namespace).Watch(metav1.ListOptions{
 		FieldSelector: fields.Set{"metadata.name": name}.AsSelector().String(),
@@ -2007,7 +2022,7 @@ func (c *Client) WaitAndGetSecret(name string, namespace string) (*corev1.Secret
 			break
 		}
 		if e, ok := val.Object.(*corev1.Secret); ok {
-			klog.V(4).Infof("Secret %s now exists", e.Name)
+			klog.V(3).Infof("Secret %s now exists", e.Name)
 			return e, nil
 		}
 	}
@@ -2015,14 +2030,14 @@ func (c *Client) WaitAndGetSecret(name string, namespace string) (*corev1.Secret
 }
 
 // FollowBuildLog stream build log to stdout
-func (c *Client) FollowBuildLog(buildName string, stdout io.Writer) error {
+func (c *Client) FollowBuildLog(buildName string, stdout io.Writer, buildTimeout time.Duration) error {
 	buildLogOptions := buildv1.BuildLogOptions{
 		Follow: true,
 		NoWait: false,
 	}
 
 	rd, err := c.buildClient.RESTClient().Get().
-		Timeout(OcBuildTimeout).
+		Timeout(buildTimeout).
 		Namespace(c.Namespace).
 		Resource("builds").
 		Name(buildName).
@@ -2071,37 +2086,8 @@ func (c *Client) DisplayDeploymentConfigLog(deploymentConfigName string, followL
 	if rd == nil {
 		return errors.New("unable to retrieve DeploymentConfig from OpenShift, does your component exist?")
 	}
-	defer rd.Close()
 
-	// Copy to stdout (in yellow)
-	color.Set(color.FgYellow)
-	defer color.Unset()
-
-	// If we are going to followLog, we'll be copying it to stdout
-	// else, we copy it to a buffer
-	if followLog {
-
-		if _, err = io.Copy(stdout, rd); err != nil {
-			return errors.Wrapf(err, "error followLoging logs for %s", deploymentConfigName)
-		}
-
-	} else {
-
-		// Copy to buffer (we aren't going to be followLoging the logs..)
-		buf := new(bytes.Buffer)
-		_, err = io.Copy(buf, rd)
-		if err != nil {
-			return errors.Wrapf(err, "unable to copy followLog to buffer")
-		}
-
-		// Copy to stdout
-		if _, err = io.Copy(stdout, buf); err != nil {
-			return errors.Wrapf(err, "error copying logs to stdout")
-		}
-
-	}
-
-	return nil
+	return util.DisplayLog(followLog, rd, deploymentConfigName)
 }
 
 // Delete takes labels as a input and based on it, deletes respective resource
@@ -2109,7 +2095,7 @@ func (c *Client) Delete(labels map[string]string, wait bool) error {
 
 	// convert labels to selector
 	selector := util.ConvertLabelsToSelector(labels)
-	klog.V(4).Infof("Selectors used for deletion: %s", selector)
+	klog.V(3).Infof("Selectors used for deletion: %s", selector)
 
 	var errorList []string
 	var deletionPolicy = metav1.DeletePropagationBackground
@@ -2119,19 +2105,19 @@ func (c *Client) Delete(labels map[string]string, wait bool) error {
 		deletionPolicy = metav1.DeletePropagationForeground
 	}
 	// Delete DeploymentConfig
-	klog.V(4).Info("Deleting DeploymentConfigs")
+	klog.V(3).Info("Deleting DeploymentConfigs")
 	err := c.appsClient.DeploymentConfigs(c.Namespace).DeleteCollection(&metav1.DeleteOptions{PropagationPolicy: &deletionPolicy}, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		errorList = append(errorList, "unable to delete deploymentconfig")
 	}
 	// Delete BuildConfig
-	klog.V(4).Info("Deleting BuildConfigs")
+	klog.V(3).Info("Deleting BuildConfigs")
 	err = c.buildClient.BuildConfigs(c.Namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		errorList = append(errorList, "unable to delete buildconfig")
 	}
 	// Delete ImageStream
-	klog.V(4).Info("Deleting ImageStreams")
+	klog.V(3).Info("Deleting ImageStreams")
 	err = c.imageClient.ImageStreams(c.Namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
 		errorList = append(errorList, "unable to delete imagestream")
@@ -2159,7 +2145,7 @@ func (c *Client) Delete(labels map[string]string, wait bool) error {
 // WaitForComponentDeletion waits for component to be deleted
 func (c *Client) WaitForComponentDeletion(selector string) error {
 
-	klog.V(4).Infof("Waiting for component to get deleted")
+	klog.V(3).Infof("Waiting for component to get deleted")
 
 	watcher, err := c.appsClient.DeploymentConfigs(c.Namespace).Watch(metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
@@ -2176,14 +2162,14 @@ func (c *Client) WaitForComponentDeletion(selector string) error {
 				return errors.New("Unable to watch deployment config")
 			}
 			if event.Type == watch.Deleted {
-				klog.V(4).Infof("WaitForComponentDeletion, Event Recieved:Deleted")
+				klog.V(3).Infof("WaitForComponentDeletion, Event Recieved:Deleted")
 				return nil
 			} else if event.Type == watch.Error {
-				klog.V(4).Infof("WaitForComponentDeletion, Event Recieved:Deleted ")
+				klog.V(3).Infof("WaitForComponentDeletion, Event Recieved:Deleted ")
 				return errors.New("Unable to watch deployment config")
 			}
 		case <-time.After(waitForComponentDeletionTimeout):
-			klog.V(4).Infof("WaitForComponentDeletion, Timeout")
+			klog.V(3).Infof("WaitForComponentDeletion, Timeout")
 			return errors.New("Time out waiting for component to get deleted")
 		}
 	}
@@ -2191,11 +2177,11 @@ func (c *Client) WaitForComponentDeletion(selector string) error {
 
 // DeleteServiceInstance takes labels as a input and based on it, deletes respective service instance
 func (c *Client) DeleteServiceInstance(labels map[string]string) error {
-	klog.V(4).Infof("Deleting Service Instance")
+	klog.V(3).Infof("Deleting Service Instance")
 
 	// convert labels to selector
 	selector := util.ConvertLabelsToSelector(labels)
-	klog.V(4).Infof("Selectors used for deletion: %s", selector)
+	klog.V(3).Infof("Selectors used for deletion: %s", selector)
 
 	// Listing out serviceInstance because `DeleteCollection` method don't work on serviceInstance
 	serviceInstances, err := c.GetServiceInstanceList(selector)
@@ -2278,7 +2264,7 @@ func (c *Client) DeleteProject(name string, wait bool) error {
 				// So we depend on val.Type as val.Object.Status.Phase is just empty string and not a mapped value constant
 				if projectStatus, ok := val.Object.(*projectv1.Project); ok {
 
-					klog.V(4).Infof("Status of delete of project %s is '%s'", name, projectStatus.Status.Phase)
+					klog.V(3).Infof("Status of delete of project %s is '%s'", name, projectStatus.Status.Phase)
 
 					switch projectStatus.Status.Phase {
 					//projectStatus.Status.Phase can only be "Terminating" or "Active" or ""
@@ -2305,7 +2291,7 @@ func (c *Client) DeleteProject(name string, wait bool) error {
 
 		select {
 		case val := <-projectChannel:
-			klog.V(4).Infof("Deletion information for project: %+v", val)
+			klog.V(3).Infof("Deletion information for project: %+v", val)
 			return nil
 		case err := <-watchErrorChannel:
 			return err
@@ -2382,7 +2368,7 @@ func (c *Client) GetServiceInstanceList(selector string) ([]scv1beta1.ServiceIns
 
 // GetBuildConfigFromName get BuildConfig by its name
 func (c *Client) GetBuildConfigFromName(name string) (*buildv1.BuildConfig, error) {
-	klog.V(4).Infof("Getting BuildConfig: %s", name)
+	klog.V(3).Infof("Getting BuildConfig: %s", name)
 	bc, err := c.buildClient.BuildConfigs(c.Namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return nil, errors.Wrapf(err, "unable to get BuildConfig %s", name)
@@ -2636,8 +2622,13 @@ func (c *Client) GetAllClusterServicePlans() ([]scv1beta1.ClusterServicePlan, er
 // CreateRoute creates a route object for the given service and with the given labels
 // serviceName is the name of the service for the target reference
 // portNumber is the target port of the route
+// path is the path of the endpoint URL
 // secureURL indicates if the route is a secure one or not
-func (c *Client) CreateRoute(name string, serviceName string, portNumber intstr.IntOrString, labels map[string]string, secureURL bool, ownerReference metav1.OwnerReference) (*routev1.Route, error) {
+func (c *Client) CreateRoute(name string, serviceName string, portNumber intstr.IntOrString, labels map[string]string, secureURL bool, path string, ownerReference metav1.OwnerReference) (*routev1.Route, error) {
+	routePath := "/"
+	if path != "" {
+		routePath = path
+	}
 	route := &routev1.Route{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
@@ -2651,6 +2642,7 @@ func (c *Client) CreateRoute(name string, serviceName string, portNumber intstr.
 			Port: &routev1.RoutePort{
 				TargetPort: portNumber,
 			},
+			Path: routePath,
 		},
 	}
 
@@ -2681,7 +2673,7 @@ func (c *Client) DeleteRoute(name string) error {
 
 // ListRoutes lists all the routes based on the given label selector
 func (c *Client) ListRoutes(labelSelector string) ([]routev1.Route, error) {
-	klog.V(4).Infof("Listing routes with label selector: %v", labelSelector)
+	klog.V(3).Infof("Listing routes with label selector: %v", labelSelector)
 	routeList, err := c.routeClient.Routes(c.Namespace).List(metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
@@ -2736,10 +2728,10 @@ func (c *Client) DeleteBuildConfig(commonObjectMeta metav1.ObjectMeta) error {
 
 	// Convert labels to selector
 	selector := util.ConvertLabelsToSelector(commonObjectMeta.Labels)
-	klog.V(4).Infof("DeleteBuildConfig selectors used for deletion: %s", selector)
+	klog.V(3).Infof("DeleteBuildConfig selectors used for deletion: %s", selector)
 
 	// Delete BuildConfig
-	klog.V(4).Info("Deleting BuildConfigs with DeleteBuildConfig")
+	klog.V(3).Info("Deleting BuildConfigs with DeleteBuildConfig")
 	return c.buildClient.BuildConfigs(c.Namespace).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
 }
 
@@ -2769,7 +2761,7 @@ func (c *Client) RemoveVolumeFromDeploymentConfig(pvc string, dcName string) err
 		if err != nil {
 			return err
 		}
-		klog.V(4).Infof("Found volume: %v in Deployment Config: %v", volumeName, dc.Name)
+		klog.V(3).Infof("Found volume: %v in Deployment Config: %v", volumeName, dc.Name)
 
 		// Remove at max 2 volume mounts if volume mounts exists
 		err = removeVolumeMountsFromDC(volumeName, dc)
@@ -2807,6 +2799,11 @@ func (c *Client) GetDeploymentConfigsFromSelector(selector string) ([]appsv1.Dep
 	return dcList.Items, nil
 }
 
+func (c *Client) GetServiceFromName(name string) (*corev1.Service, error) {
+	service, err := c.kubeClient.CoreV1().Services(c.Namespace).Get(name, metav1.GetOptions{})
+	return service, err
+}
+
 // GetServicesFromSelector returns an array of Service resources which match the
 // given selector
 func (c *Client) GetServicesFromSelector(selector string) ([]corev1.Service, error) {
@@ -2822,7 +2819,7 @@ func (c *Client) GetServicesFromSelector(selector string) ([]corev1.Service, err
 // GetDeploymentConfigFromName returns the Deployment Config resource given
 // the Deployment Config name
 func (c *Client) GetDeploymentConfigFromName(name string) (*appsv1.DeploymentConfig, error) {
-	klog.V(4).Infof("Getting DeploymentConfig: %s", name)
+	klog.V(3).Infof("Getting DeploymentConfig: %s", name)
 	deploymentConfig, err := c.appsClient.DeploymentConfigs(c.Namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -2969,7 +2966,7 @@ func (c *Client) GetServerVersion() (*ServerInfo, error) {
 	rawOpenShiftVersion, err := c.kubeClient.CoreV1().RESTClient().Get().AbsPath("/version/openshift").Do().Raw()
 	if err != nil {
 		// when using Minishift (or plain 'oc cluster up' for that matter) with OKD 3.11, the version endpoint is missing...
-		klog.V(4).Infof("Unable to get OpenShift Version - endpoint '/version/openshift' doesn't exist")
+		klog.V(3).Infof("Unable to get OpenShift Version - endpoint '/version/openshift' doesn't exist")
 	} else {
 		var openShiftVersion version.Info
 		if err := json.Unmarshal(rawOpenShiftVersion, &openShiftVersion); err != nil {
@@ -3051,7 +3048,7 @@ func (c *Client) ExtractProjectToComponent(compInfo common.ComponentInfo, target
 	cmdArr := []string{"tar", "xf", "-", "-C", targetPath}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	klog.V(4).Infof("Executing command %s", strings.Join(cmdArr, " "))
+	klog.V(3).Infof("Executing command %s", strings.Join(cmdArr, " "))
 	err := c.ExecCMDInContainer(compInfo, cmdArr, &stdout, &stderr, stdin, false)
 	if err != nil {
 		log.Errorf("Command '%s' in container failed.\n", strings.Join(cmdArr, " "))
@@ -3112,6 +3109,37 @@ func (c *Client) GetPVCFromName(pvcName string) (*corev1.PersistentVolumeClaim, 
 	return c.kubeClient.CoreV1().PersistentVolumeClaims(c.Namespace).Get(pvcName, metav1.GetOptions{})
 }
 
+// CreateDockerBuildConfigWithBinaryAndDockerfile creates a BuildConfig which accepts
+// as input a binary which contains a dockerfile at a specific location. It will build
+// the source with Dockerfile, and push the image using tag.
+// envVars is the array containing the environment variables
+func (c *Client) CreateDockerBuildConfigWithBinaryInput(commonObjectMeta metav1.ObjectMeta, dockerfilePath string, outputImageTag string, envVars []corev1.EnvVar, outputType string) (bc buildv1.BuildConfig, err error) {
+	// generate and create ImageStream if not present
+
+	var imageStream *imagev1.ImageStream
+	if imageStream, err = c.GetImageStream(c.Namespace, commonObjectMeta.Name, ""); err != nil || imageStream == nil {
+		imageStream = &imagev1.ImageStream{
+			ObjectMeta: commonObjectMeta,
+		}
+
+		_, err = c.imageClient.ImageStreams(c.Namespace).Create(imageStream)
+		if err != nil {
+			return bc, errors.Wrapf(err, "unable to create ImageStream for %s", commonObjectMeta.Name)
+		}
+	}
+
+	bc = generateDockerBuildConfigWithBinaryInput(commonObjectMeta, dockerfilePath, outputImageTag, outputType)
+
+	if len(envVars) > 0 {
+		bc.Spec.Strategy.SourceStrategy.Env = envVars
+	}
+	_, err = c.buildClient.BuildConfigs(c.Namespace).Create(&bc)
+	if err != nil {
+		return bc, errors.Wrapf(err, "unable to create BuildConfig for %s", commonObjectMeta.Name)
+	}
+	return bc, err
+}
+
 // CreateBuildConfig creates a buildConfig using the builderImage as well as gitURL.
 // envVars is the array containing the environment variables
 func (c *Client) CreateBuildConfig(commonObjectMeta metav1.ObjectMeta, builderImage string, gitURL string, gitRef string, envVars []corev1.EnvVar) (buildv1.BuildConfig, error) {
@@ -3127,7 +3155,7 @@ func (c *Client) CreateBuildConfig(commonObjectMeta metav1.ObjectMeta, builderIm
 	}
 	imageNS = imageStream.ObjectMeta.Namespace
 
-	klog.V(4).Infof("Using namespace: %s for the CreateBuildConfig function", imageNS)
+	klog.V(3).Infof("Using namespace: %s for the CreateBuildConfig function", imageNS)
 
 	// Use BuildConfig to build the container with Git
 	bc := generateBuildConfig(commonObjectMeta, gitURL, gitRef, imageName+":"+imageTag, imageNS)
@@ -3219,7 +3247,7 @@ func (c *Client) PropagateDeletes(targetPodName string, delSrcRelPaths []string,
 			rmPaths = append(rmPaths, filepath.ToSlash(filepath.Join(s2iPath, delRelPath)))
 		}
 	}
-	klog.V(4).Infof("s2ipaths marked for deletion are %+v", rmPaths)
+	klog.V(3).Infof("s2ipaths marked for deletion are %+v", rmPaths)
 	cmdArr := []string{"rm", "-rf"}
 	cmdArr = append(cmdArr, rmPaths...)
 	compInfo := common.ComponentInfo{
@@ -3239,7 +3267,7 @@ func (c *Client) StartDeployment(deploymentName string) (string, error) {
 	if deploymentName == "" {
 		return "", errors.Errorf("deployment name is empty")
 	}
-	klog.V(4).Infof("Deployment %s started.", deploymentName)
+	klog.V(3).Infof("Deployment %s started.", deploymentName)
 	deploymentRequest := appsv1.DeploymentRequest{
 		Name: deploymentName,
 		// latest is set to true to prevent image name resolution issue
@@ -3251,7 +3279,7 @@ func (c *Client) StartDeployment(deploymentName string) (string, error) {
 	if err != nil {
 		return "", errors.Wrapf(err, "unable to instantiate Deployment for %s", deploymentName)
 	}
-	klog.V(4).Infof("Deployment %s for DeploymentConfig %s triggered.", deploymentName, result.Name)
+	klog.V(3).Infof("Deployment %s for DeploymentConfig %s triggered.", deploymentName, result.Name)
 
 	return result.Name, nil
 }
@@ -3287,6 +3315,14 @@ func injectS2IPaths(existingVars []corev1.EnvVar, s2iPaths S2IPaths) []corev1.En
 
 }
 
+// IsDeploymentConfigSupported checks if DeploymentConfig type is present on the cluster
+func (c *Client) IsDeploymentConfigSupported() (bool, error) {
+	const Group = "apps.openshift.io"
+	const Version = "v1"
+
+	return c.isResourceSupported(Group, Version, "deploymentconfigs")
+}
+
 func isSubDir(baseDir, otherDir string) bool {
 	cleanedBaseDir := filepath.Clean(baseDir)
 	cleanedOtherDir := filepath.Clean(otherDir)
@@ -3298,16 +3334,32 @@ func isSubDir(baseDir, otherDir string) bool {
 	return matches
 }
 
+// IsBuildConfigSupported checks if buildconfig resource type is present on the cluster
+func (c *Client) IsBuildConfigSupported() (bool, error) {
+
+	return c.isResourceSupported("build.openshift.io", "v1", "buildconfigs")
+}
+
 // IsRouteSupported checks if route resource type is present on the cluster
 func (c *Client) IsRouteSupported() (bool, error) {
 
 	return c.isResourceSupported("route.openshift.io", "v1", "routes")
 }
 
+// IsProjectSupported checks if Project resource type is present on the cluster
+func (c *Client) IsProjectSupported() (bool, error) {
+	return c.isResourceSupported("project.openshift.io", "v1", "projects")
+}
+
 // IsImageStreamSupported checks if imagestream resource type is present on the cluster
 func (c *Client) IsImageStreamSupported() (bool, error) {
 
 	return c.isResourceSupported("image.openshift.io", "v1", "imagestreams")
+}
+
+// IsSBRSupported chekcs if resource of type service binding request present on the cluster
+func (c *Client) IsSBRSupported() (bool, error) {
+	return c.isResourceSupported("apps.openshift.io", "v1alpha1", "servicebindingrequests")
 }
 
 // GenerateOwnerReference genertes an ownerReference which can then be set as
@@ -3343,4 +3395,106 @@ func (c *Client) isResourceSupported(apiGroup, apiVersion, resourceName string) 
 		}
 	}
 	return false, nil
+}
+
+// UpdateImageStreamOwnerReference
+func (c *Client) UpdateImageStream(imageStream *imagev1.ImageStream) (err error) {
+	_, err = c.imageClient.ImageStreams(c.Namespace).Update(imageStream)
+	return
+}
+
+func (c *Client) GetApplicationURLFromService(applicationName string) (fullURL string) {
+	service, err := c.GetServiceFromName(applicationName)
+	if err != nil {
+		return ""
+	}
+
+	if service.Status.LoadBalancer.Size() > 0 {
+		fullURL = fmt.Sprintf("http://%s:%d", service.Status.LoadBalancer.Ingress[0].Hostname, service.Spec.Ports[0].NodePort)
+	}
+
+	return fullURL
+}
+
+func (c *Client) GetApplicationURL(applicationName, labelSelector string) (fullURL string, err error) {
+	routeSupported, _ := c.IsRouteSupported()
+	if routeSupported {
+		routes, err := c.ListRoutes(labelSelector)
+		if err != nil || len(routes) <= 0 {
+			// No URL found - try looking in the Service
+			fullURL = c.GetApplicationURLFromService(applicationName)
+			if fullURL == "" {
+				// still no URL found - try looking for a knative Route therefore need to wait for Service and Route to be setup.
+				knGvr := schema.GroupVersionResource{Group: "serving.knative.dev", Version: "v1", Resource: "routes"}
+				knRoute, err := c.waitForManifestDeployCompletion(applicationName, knGvr, "Ready")
+				if err != nil {
+					return "", errors.Wrap(err, "error while waiting for deployment completion")
+				}
+				fullURL = knRoute.UnstructuredContent()["status"].(map[string]interface{})["url"].(string)
+			}
+		} else {
+			if len(routes) == 1 {
+				fullURL = fmt.Sprintf("%s://%s", getRouteProtocol(routes[0]), routes[0].Spec.Host)
+			} else {
+				return "", errors.New("multiple routes found")
+			}
+		}
+	} else {
+		// TODO: Look for other resources, ie Ingress
+		return "", errors.New("Route not supported")
+	}
+
+	if fullURL == "" {
+		return "", errors.New("URL not able to be found")
+	}
+
+	return fullURL, nil
+}
+
+// Create a function to wait for deploment completion of any unstructured object
+func (c *Client) waitForManifestDeployCompletion(applicationName string, gvr schema.GroupVersionResource, conditionTypeValue string) (*unstructured.Unstructured, error) {
+	klog.V(4).Infof("Waiting for %s manifest deployment completion", applicationName)
+	w, err := c.dynamicClient.Resource(gvr).Namespace(c.Namespace).Watch(metav1.ListOptions{FieldSelector: "metadata.name=" + applicationName})
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to watch deployment")
+	}
+	defer w.Stop()
+	success := make(chan *unstructured.Unstructured)
+	failure := make(chan error)
+
+	go func() {
+		defer close(success)
+		defer close(failure)
+
+		for {
+			val, ok := <-w.ResultChan()
+			if !ok {
+				failure <- errors.New("watch channel was closed")
+				return
+			}
+			if watchObject, ok := val.Object.(*unstructured.Unstructured); ok {
+				// TODO: Add more details on what to check to see if object deployment is complete
+				// Currently only checks to see if status.conditions[] contains a condition with type = conditionTypeValue
+				condition := getNamedConditionFromObjectStatus(watchObject, conditionTypeValue)
+				if condition != nil {
+					if condition["status"] == "Fail" {
+						failure <- fmt.Errorf("manifest deployment %s failed", applicationName)
+						return
+					} else if condition["status"] == "True" {
+						success <- watchObject
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case val := <-success:
+		return val, nil
+	case err := <-failure:
+		return nil, err
+	case <-time.After(DeployWaitTimeout):
+		return nil, errors.Errorf("timeout while waiting for %s manifest deployment completion", applicationName)
+	}
 }

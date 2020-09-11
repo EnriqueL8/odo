@@ -2,18 +2,22 @@ package component
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+	"github.com/zalando/go-keyring"
 	"k8s.io/klog"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/openshift/odo/pkg/catalog"
 	"github.com/openshift/odo/pkg/component"
 	"github.com/openshift/odo/pkg/config"
+	"github.com/openshift/odo/pkg/devfile"
 	"github.com/openshift/odo/pkg/devfile/parser"
 	"github.com/openshift/odo/pkg/devfile/parser/data/common"
 	"github.com/openshift/odo/pkg/envinfo"
@@ -24,12 +28,13 @@ import (
 	catalogutil "github.com/openshift/odo/pkg/odo/cli/catalog/util"
 	"github.com/openshift/odo/pkg/odo/cli/component/ui"
 	projectCmd "github.com/openshift/odo/pkg/odo/cli/project"
+	registryUtil "github.com/openshift/odo/pkg/odo/cli/registry/util"
 	commonui "github.com/openshift/odo/pkg/odo/cli/ui"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
 	odoutil "github.com/openshift/odo/pkg/odo/util"
 	"github.com/openshift/odo/pkg/odo/util/completion"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/openshift/odo/pkg/odo/util/pushtarget"
+	"github.com/openshift/odo/pkg/preference"
 	"github.com/openshift/odo/pkg/util"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,15 +50,11 @@ type CreateOptions struct {
 	componentContext  string
 	componentPorts    []string
 	componentEnvVars  []string
-	memoryMax         string
-	memoryMin         string
-	memory            string
-	cpuMax            string
-	cpuMin            string
-	cpu               string
+	appName           string
 	interactive       bool
 	now               bool
-	*CommonPushOptions
+	forceS2i          bool
+	*PushOptions
 	devfileMetadata DevfileMetadata
 }
 
@@ -72,7 +73,8 @@ type DevfileMetadata struct {
 	devfileLink        string
 	devfileRegistry    catalog.Registry
 	devfilePath        devfilePath
-	downloadSource     string
+	starter            string
+	token              string
 }
 
 // CreateRecommendedCommandName is the recommended watch command name
@@ -82,21 +84,11 @@ const CreateRecommendedCommandName = "create"
 // since the application will always be in the same directory as `.odo`, we will always set this as: ./
 const LocalDirectoryDefaultLocation = "./"
 
-// Constants for devfile component
-const devFile = "devfile.yaml"
-
 var (
 	envFile    = filepath.Join(".odo", "env", "env.yaml")
 	configFile = filepath.Join(".odo", "config.yaml")
 	envDir     = filepath.Join(".odo", "env")
 )
-
-// DevfilePath is the devfile path that is used by odo,
-// which means odo can:
-// 1. Directly use the devfile in DevfilePath
-// 2. Download devfile from registry to DevfilePath then use the devfile in DevfilePath
-// 3. Copy user's own devfile (path is specified via --devfile flag) to DevfilePath then use the devfile in DevfilePath
-var DevfilePath = filepath.Join(LocalDirectoryDefaultLocation, devFile)
 
 // EnvFilePath is the path of env file for devfile component
 var EnvFilePath = filepath.Join(LocalDirectoryDefaultLocation, envFile)
@@ -104,25 +96,24 @@ var EnvFilePath = filepath.Join(LocalDirectoryDefaultLocation, envFile)
 // ConfigFilePath is the path of config.yaml for s2i component
 var ConfigFilePath = filepath.Join(LocalDirectoryDefaultLocation, configFile)
 
-var createLongDesc = ktemplates.LongDesc(`Create a configuration describing a component.
+var createLongDesc = ktemplates.LongDesc(`Create a configuration describing a component.`)
 
-If a component name is not provided, it'll be auto-generated.
+var createExample = ktemplates.Examples(`# Create a new Node.JS component with existing sourcecode as well as specifying a name
+%[1]s nodejs mynodejs
 
-A full list of component types that can be deployed is available using: 'odo catalog list'
-
-By default, builder images (component type) will be used from the current namespace. You can explicitly supply a namespace by using: odo create namespace/name:version
-If version is not specified by default, latest will be chosen as the version.`)
-
-var createExample = ktemplates.Examples(`  # Create new Node.js component with the source in current directory.
-
-Note: When you use odo with experimental mode enabled and create devfile component, if you want to use existing devfile the first argument will be the component name
-# Create new Node.js component with existing devfile
-%[1]s mynodejs (devfile exists in current working directory)
-%[1]s mynodejs --devfile ./devfile.yaml (devfile exists in any other directory)
-%[1]s mynodejs --devfile https://raw.githubusercontent.com/elsony/devfile-registry/master/devfiles/nodejs/devfile.yaml (devfile exists in network)
-
-# Create new Node.js component
+# Name is not required and will be automatically generated if not passed
 %[1]s nodejs
+
+# List all available components before deploying
+odo catalog list components
+%[1]s java-quarkus
+
+# Download an example devfile and application before deploying
+%[1]s nodejs --starter
+
+# Using a specific devfile
+%[1]s mynodejs --devfile ./devfile.yaml
+%[1]s mynodejs --devfile https://raw.githubusercontent.com/odo-devfiles/registry/master/devfiles/nodejs/devfile.yaml
 
 # Create new Node.js component named 'frontend' with the source in './frontend' directory
 %[1]s nodejs frontend --context ./frontend
@@ -133,23 +124,19 @@ Note: When you use odo with experimental mode enabled and create devfile compone
 # Create new Node.js component with source from remote git repository
 %[1]s nodejs --git https://github.com/openshift/nodejs-ex.git
 
-# Create new Node.js component with custom ports, additional environment variables and memory and cpu limits
-%[1]s nodejs --port 8080,8100/tcp,9100/udp --env key=value,key1=value1 --memory 4Gi --cpu 2
+# Create new Node.js component with custom ports and environment variables
+%[1]s nodejs --port 8080,8100/tcp,9100/udp --env key=value,key1=value1`)
 
-# Create new Node.js component and download the sample project named nodejs-starter
-%[1]s nodejs --downloadSource=nodejs-starter`)
-
-const defaultProjectName = "devfile-project-name"
+const defaultStarterProjectName = "devfile-starter-project-name"
 
 // NewCreateOptions returns new instance of CreateOptions
 func NewCreateOptions() *CreateOptions {
 	return &CreateOptions{
-		CommonPushOptions: NewCommonPushOptions(),
+		PushOptions: NewPushOptions(),
 	}
 }
 
 func (co *CreateOptions) setComponentSourceAttributes() (err error) {
-
 	// Set the correct application context
 	co.componentSettings.Application = &(co.Context.Application)
 
@@ -200,7 +187,7 @@ func (co *CreateOptions) setComponentSourceAttributes() (err error) {
 
 	// Error out by default if no type of sources were passed..
 	default:
-		return fmt.Errorf("The source can be either --binary or --local or --git")
+		return fmt.Errorf("the source can be either --binary or --local or --git")
 
 	}
 
@@ -211,7 +198,7 @@ func (co *CreateOptions) setComponentSourceAttributes() (err error) {
 
 	// Error out if reference is passed but no --git flag passed
 	if len(co.componentGit) == 0 && len(co.componentGitRef) != 0 {
-		return fmt.Errorf("The --ref flag is only valid for --git flag")
+		return fmt.Errorf("the --ref flag is only valid for --git flag")
 	}
 
 	return
@@ -295,57 +282,102 @@ func createDefaultComponentName(context *genericclioptions.Context, componentTyp
 	return componentName, nil
 }
 
-func (co *CreateOptions) setResourceLimits() error {
-	ensureAndLogProperResourceUsage(co.memory, co.memoryMin, co.memoryMax, "memory")
-
-	ensureAndLogProperResourceUsage(co.cpu, co.cpuMin, co.cpuMax, "cpu")
-
-	memoryQuantity, err := util.FetchResourceQuantity(corev1.ResourceMemory, co.memoryMin, co.memoryMax, co.memory)
-	if err != nil {
-		return err
-	}
-	if memoryQuantity != nil {
-		minMemory := memoryQuantity.MinQty.String()
-		maxMemory := memoryQuantity.MaxQty.String()
-		co.componentSettings.MinMemory = &minMemory
-		co.componentSettings.MaxMemory = &maxMemory
+func (co *CreateOptions) checkConflictingFlags() (err error) {
+	if err = co.checkConflictingS2IFlags(); err != nil {
+		return
 	}
 
-	cpuQuantity, err := util.FetchResourceQuantity(corev1.ResourceCPU, co.cpuMin, co.cpuMax, co.cpu)
-	if err != nil {
-		return err
-	}
-	if cpuQuantity != nil {
-		minCPU := cpuQuantity.MinQty.String()
-		maxCPU := cpuQuantity.MaxQty.String()
-		co.componentSettings.MinCPU = &minCPU
-		co.componentSettings.MaxCPU = &maxCPU
+	if err = co.checkConflictingDevfileFlags(); err != nil {
+		return
 	}
 
 	return nil
 }
 
+func (co *CreateOptions) checkConflictingS2IFlags() error {
+	if !co.forceS2i {
+		errorString := "flag --%s, requires --s2i flag to be set, when deploying S2I (Source-to-Image) components."
+
+		var flagName string
+		if len(co.componentBinary) != 0 {
+			flagName = "binary"
+		} else if len(co.componentGit) != 0 {
+			flagName = "git"
+		} else if len(co.componentEnvVars) != 0 {
+			flagName = "env"
+		} else if len(co.componentPorts) != 0 {
+			flagName = "port"
+		}
+
+		if len(flagName) != 0 {
+			return errors.New(fmt.Sprintf(errorString, flagName))
+		}
+	}
+	return nil
+}
+
+func (co *CreateOptions) checkConflictingDevfileFlags() error {
+	if co.forceS2i {
+		errorString := "you can't set --s2i flag as true if you want to use the %s via --%s flag"
+
+		var flagName string
+		if len(co.devfileMetadata.devfilePath.value) != 0 {
+			flagName = "devfile"
+		} else if len(co.devfileMetadata.devfileRegistry.Name) != 0 {
+			flagName = "registry"
+		} else if len(co.devfileMetadata.token) != 0 {
+			flagName = "token"
+		} else if len(co.devfileMetadata.starter) != 0 {
+			flagName = "starter"
+		}
+
+		if len(flagName) != 0 {
+			return errors.New(fmt.Sprintf(errorString, flagName, flagName))
+		}
+	}
+	return nil
+}
+
 // Complete completes create args
 func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
+	// this populates the LocalConfigInfo as well
+	co.Context = genericclioptions.NewContextCreatingAppIfNeeded(cmd)
 
-	if experimental.IsExperimentalModeEnabled() {
-		// Add a disclaimer that we are in *experimental mode*
-		log.Experimental("Experimental mode is enabled, use at your own risk")
+	// If not using --s2i
+	if !co.forceS2i {
+
+		err = co.checkConflictingFlags()
+		if err != nil {
+			return
+		}
 
 		// Configure the context
 		if co.componentContext != "" {
 			DevfilePath = filepath.Join(co.componentContext, devFile)
+			log.Infof("Devfile path: %s", co.DevfilePath)
 			EnvFilePath = filepath.Join(co.componentContext, envFile)
 			ConfigFilePath = filepath.Join(co.componentContext, configFile)
-			co.CommonPushOptions.componentContext = co.componentContext
+			co.PushOptions.componentContext = co.componentContext
 		}
+		co.DevfilePath = DevfilePath
 
 		if util.CheckPathExists(ConfigFilePath) || util.CheckPathExists(EnvFilePath) {
-			return errors.New("This directory already contains a component")
+			return errors.New("this directory already contains a component")
 		}
 
-		if util.CheckPathExists(DevfilePath) && co.devfileMetadata.devfilePath.value != "" && !util.PathEqual(DevfilePath, co.devfileMetadata.devfilePath.value) {
-			return errors.New("This directory already contains a devfile, you can't specify devfile via --devfile")
+		if util.CheckPathExists(co.DevfilePath) && co.devfileMetadata.devfilePath.value != "" && !util.PathEqual(co.DevfilePath, co.devfileMetadata.devfilePath.value) {
+			return errors.New("this directory already contains a devfile, you can't specify devfile via --devfile")
+		}
+
+		co.appName = genericclioptions.ResolveAppFlag(cmd)
+
+		var catalogList catalog.ComponentTypeList
+		if co.forceS2i {
+			client := co.Client
+			catalogList, err = catalog.ListComponents(client)
+			if err != nil {
+				return err
+			}
 		}
 
 		// Validate user specify devfile path
@@ -353,7 +385,7 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 			fileErr := util.ValidateFile(co.devfileMetadata.devfilePath.value)
 			urlErr := util.ValidateURL(co.devfileMetadata.devfilePath.value)
 			if fileErr != nil && urlErr != nil {
-				return errors.Errorf("The devfile path you specify is invalid with either file error \"%v\" or url error \"%v\"", fileErr, urlErr)
+				return errors.Errorf("the devfile path you specify is invalid with either file error \"%v\" or url error \"%v\"", fileErr, urlErr)
 			} else if fileErr == nil {
 				co.devfileMetadata.devfilePath.protocol = "file"
 			} else if urlErr == nil {
@@ -363,21 +395,22 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 
 		// Validate user specify registry
 		if co.devfileMetadata.devfileRegistry.Name != "" {
+
 			if co.devfileMetadata.devfilePath.value != "" {
-				return errors.New("You can't specify registry via --registry if you want to use the devfile that is specified via --devfile")
+				return errors.New("you can't specify registry via --registry if you want to use the devfile that is specified via --devfile")
 			}
 
 			registryList, err := catalog.GetDevfileRegistries(co.devfileMetadata.devfileRegistry.Name)
 			if err != nil {
-				return errors.Wrap(err, "Failed to get registry")
+				return errors.Wrap(err, "failed to get registry")
 			}
 			if len(registryList) == 0 {
-				return errors.Errorf("Registry %s doesn't exist, please specify a valid registry via --registry", co.devfileMetadata.devfileRegistry.Name)
+				return errors.Errorf("registry %s doesn't exist, please specify a valid registry via --registry", co.devfileMetadata.devfileRegistry.Name)
 			}
 		}
 
 		// Can't use the existing devfile or download devfile from registry, go to interactive mode
-		if len(args) == 0 && !util.CheckPathExists(DevfilePath) && co.devfileMetadata.devfilePath.value == "" {
+		if len(args) == 0 && !util.CheckPathExists(co.DevfilePath) && co.devfileMetadata.devfilePath.value == "" {
 			co.interactive = true
 		}
 
@@ -399,7 +432,7 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 		var catalogDevfileList catalog.DevfileComponentTypeList
 		isDevfileRegistryPresent := true // defaulted to true since odo ships with a default registry set
 
-		if co.interactive {
+		if co.interactive && !co.forceS2i {
 			// Interactive mode
 
 			// Get available devfile components for checking devfile compatibility
@@ -430,14 +463,19 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 					componentNamespace = ui.EnterDevfileComponentNamespace(defaultComponentNamespace)
 				}
 			}
+
 		} else {
 			// Direct mode (User enters the full command)
 
-			if util.CheckPathExists(DevfilePath) || co.devfileMetadata.devfilePath.value != "" {
+			if util.CheckPathExists(co.DevfilePath) || co.devfileMetadata.devfilePath.value != "" {
 				// Use existing devfile directly
 
+				if co.forceS2i {
+					return errors.Errorf("existing devfile component detected. Please remove the devfile component before creating an s2i component")
+				}
+
 				if len(args) > 1 {
-					return errors.Errorf("Accepts between 0 and 1 arg when using existing devfile, received %d", len(args))
+					return errors.Errorf("accepts between 0 and 1 arg when using existing devfile, received %d", len(args))
 				}
 
 				// If user can use existing devfile directly, the first arg is component name instead of component type
@@ -453,7 +491,7 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 				}
 
 				co.devfileMetadata.devfileSupport = true
-			} else {
+			} else if len(args) > 0 {
 				// Download devfile from registry
 
 				// Component type: Get from full command's first argument (mandatory in direct mode)
@@ -471,6 +509,9 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 				if err != nil {
 					return err
 				}
+				if co.devfileMetadata.devfileRegistry.Name != "" && catalogDevfileList.Items == nil {
+					return errors.Errorf("can't create devfile component from registry %s", co.devfileMetadata.devfileRegistry.Name)
+				}
 
 				if len(catalogDevfileList.DevfileRegistries) == 0 {
 					isDevfileRegistryPresent = false
@@ -478,12 +519,15 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 				}
 			}
 
-			// Component namespace: Get from --project flag, by default it is the current active namespace
-			if cmd.Flags().Changed("project") && !pushtarget.IsPushTargetDocker() {
-				componentNamespace, err = cmd.Flags().GetString("project")
+			// Component namespace: Get from --project flag or --namespace flag, by default it is the current active namespace
+			if co.devfileMetadata.componentNamespace == "" && !pushtarget.IsPushTargetDocker() {
+
+				// Check to see if we've passed in "project", if not, default to the standard Kubernetes namespace
+				componentNamespace, err = retrieveCmdNamespace(cmd)
 				if err != nil {
 					return err
 				}
+
 			} else {
 				componentNamespace = defaultComponentNamespace
 			}
@@ -494,15 +538,15 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 		co.devfileMetadata.componentName = strings.ToLower(componentName)
 		co.devfileMetadata.componentNamespace = strings.ToLower(componentNamespace)
 
-		if util.CheckPathExists(DevfilePath) || co.devfileMetadata.devfilePath.value != "" {
+		if util.CheckPathExists(co.DevfilePath) || co.devfileMetadata.devfilePath.value != "" {
 			// Categorize the sections
 			log.Info("Validation")
 
 			var devfileAbsolutePath string
-			if util.CheckPathExists(DevfilePath) || co.devfileMetadata.devfilePath.protocol == "file" {
+			if util.CheckPathExists(co.DevfilePath) || co.devfileMetadata.devfilePath.protocol == "file" {
 				var devfilePath string
-				if util.CheckPathExists(DevfilePath) {
-					devfilePath = DevfilePath
+				if util.CheckPathExists(co.DevfilePath) {
+					devfilePath = co.DevfilePath
 				} else {
 					devfilePath = co.devfileMetadata.devfilePath.value
 				}
@@ -525,7 +569,7 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 			return nil
 		}
 
-		if isDevfileRegistryPresent {
+		if isDevfileRegistryPresent && !co.forceS2i {
 			// Categorize the sections
 			log.Info("Validation")
 
@@ -542,6 +586,19 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 					co.devfileMetadata.devfileLink = devfileComponent.Link
 					co.devfileMetadata.devfileRegistry = devfileComponent.Registry
 					break
+				}
+			}
+
+			if co.forceS2i && hasComponent {
+				s2iOverride := false
+				for _, item := range catalogList.Items {
+					if item.Name == co.devfileMetadata.componentType {
+						s2iOverride = true
+						break
+					}
+				}
+				if !s2iOverride {
+					return errors.New("cannot select this devfile component type with --s2i flag")
 				}
 			}
 
@@ -572,20 +629,14 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 			// we should error out instead of running s2i componet code and throw warning message
 			if co.devfileMetadata.devfileRegistry.Name != "" {
 				return errors.Errorf("Devfile component type %s is not supported, please run `odo catalog list components` for a list of supported devfile component types", co.devfileMetadata.componentType)
-			} else {
-				log.Warningf("Devfile component type %s is not supported, please run `odo catalog list components` for a list of supported devfile component types", co.devfileMetadata.componentType)
 			}
+
+			log.Warningf("Devfile component type %s is not supported, please run `odo catalog list components` for a list of supported devfile component types", co.devfileMetadata.componentType)
 		}
 	}
 
 	if len(args) == 0 || !cmd.HasFlags() {
 		co.interactive = true
-	}
-
-	// this populates the LocalConfigInfo as well
-	co.Context = genericclioptions.NewContextCreatingAppIfNeeded(cmd)
-	if err != nil {
-		return errors.Wrap(err, "failed initiating local config")
 	}
 
 	// Do not execute S2I specific code on Kubernetes Cluster or Docker
@@ -607,8 +658,6 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 	}
 
 	co.componentSettings = co.LocalConfigInfo.GetComponentSettings()
-
-	co.Context = genericclioptions.NewContextCreatingAppIfNeeded(cmd)
 
 	// Below code is for INTERACTIVE mode
 	if co.interactive {
@@ -743,10 +792,6 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 		if err != nil {
 			return err
 		}
-		err = co.setResourceLimits()
-		if err != nil {
-			return err
-		}
 
 		var portList []string
 		if len(co.componentPorts) > 0 {
@@ -781,29 +826,27 @@ func (co *CreateOptions) Complete(name string, cmd *cobra.Command, args []string
 // Validate validates the create parameters
 func (co *CreateOptions) Validate() (err error) {
 
-	if experimental.IsExperimentalModeEnabled() {
-		if co.devfileMetadata.devfileSupport {
-			// Validate if the devfile component that user wants to create already exists
-			spinner := log.Spinner("Validating devfile component")
-			defer spinner.End(false)
+	if !co.forceS2i && co.devfileMetadata.devfileSupport {
+		// Validate if the devfile component that user wants to create already exists
+		spinner := log.Spinner("Validating devfile component")
+		defer spinner.End(false)
 
-			err = util.ValidateK8sResourceName("component name", co.devfileMetadata.componentName)
+		err = util.ValidateK8sResourceName("component name", co.devfileMetadata.componentName)
+		if err != nil {
+			return err
+		}
+
+		// Only validate namespace if pushtarget isn't docker
+		if !pushtarget.IsPushTargetDocker() {
+			err := util.ValidateK8sResourceName("component namespace", co.devfileMetadata.componentNamespace)
 			if err != nil {
 				return err
 			}
-
-			// Only validate namespace if pushtarget isn't docker
-			if !pushtarget.IsPushTargetDocker() {
-				err := util.ValidateK8sResourceName("component namespace", co.devfileMetadata.componentNamespace)
-				if err != nil {
-					return err
-				}
-			}
-
-			spinner.End(true)
-
-			return nil
 		}
+
+		spinner.End(true)
+
+		return nil
 	}
 
 	log.Info("Validation")
@@ -827,164 +870,117 @@ func (co *CreateOptions) Validate() (err error) {
 	return nil
 }
 
-// Downloads first project from list of projects in devfile
+// Downloads first starter project from list of starter projects in devfile
 // Currenty type git with a non github url is not supported
-func (co *CreateOptions) downloadProject(projectPassed string) error {
-	var project common.DevfileProject
-	// Parse devfile and validate
-	devObj, err := parser.ParseAndValidate(DevfilePath)
-	if err != nil {
-		return err
-	}
-	projects := devObj.Data.GetProjects()
-	nOfProjects := len(projects)
-	if nOfProjects == 0 {
-		return errors.Errorf("No project found in devfile component.")
+func downloadStarterProject(devObj parser.DevfileObj, projectPassed string, interactive bool) error {
+	if projectPassed == "" && !interactive {
+		return nil
 	}
 
-	if nOfProjects == 1 && projectPassed == defaultProjectName {
-		project = projects[0]
-	} else if nOfProjects > 1 && projectPassed == defaultProjectName {
-		project = projects[0]
-		log.Warning("There are multiple projects in this devfile but none have been specified in --downloadSource. Downloading the first: " + project.Name)
-	} else { //If the user has specified a project
-		projectFound := false
-		for indexOfProject, projectInfo := range projects {
-			if projectInfo.Name == projectPassed { //Get the index
-				project = projects[indexOfProject]
-				projectFound = true
-			}
-		}
+	// Retrieve starter projects
+	starterProjects := devObj.Data.GetStarterProjects()
 
-		if !projectFound {
-			return errors.Errorf("The project: %s specified in --downloadSource does not exist", projectPassed)
+	var starterProject *common.DevfileStarterProject
+	var err error
+	if interactive {
+		starterProject = getStarterProjectInteractiveMode(starterProjects)
+	} else {
+		starterProject, err = getStarterProjectFromFlag(starterProjects, projectPassed)
+		if err != nil {
+			return err
 		}
 	}
 
+	if starterProject == nil {
+		return nil
+	}
+
+	// Retrieve the working directory in order to clone correctly
 	path, err := os.Getwd()
 	if err != nil {
 		return errors.Wrapf(err, "Could not get the current working directory.")
 	}
 
-	if project.ClonePath != "" {
-		clonePath := project.ClonePath
-		if runtime.GOOS == "windows" {
-			clonePath = strings.Replace(clonePath, "\\", "/", -1)
-		}
+	if starterProject.ClonePath != "" {
+		clonePath := filepath.FromSlash(starterProject.ClonePath)
 
 		path = filepath.Join(path, clonePath)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			err = os.MkdirAll(path, os.FileMode(0755))
 			if err != nil {
-				return errors.Wrap(err, "Failed creating folder with path: "+path)
+				return errors.Wrapf(err, "failed creating folder with path: %s", path)
 			}
 		}
 	}
 
+	// We will check to see if the project has a valid directory
 	err = util.IsValidProjectDir(path, DevfilePath)
 	if err != nil {
 		return err
 	}
 
-	var url, sparseDir string
-	if project.Git != nil {
-		if strings.Contains(project.Git.Location, "github.com") {
-			url, err = util.GetGitHubZipURL(project.Git.Location)
-			if err != nil {
-				return err
-			}
-			sparseDir = project.Git.SparseCheckoutDir
+	log.Info("\nStarter Project")
+
+	if starterProject.Git != nil || starterProject.Github != nil {
+
+		projectSource := common.GitLikeProjectSource{}
+		if starterProject.Git != nil {
+			projectSource = starterProject.Git.GitLikeProjectSource
 		} else {
-			return errors.Errorf("Project type git with non github url not supported")
+			projectSource = starterProject.Github.GitLikeProjectSource
 		}
-	} else if project.Github != nil {
-		url, err = util.GetGitHubZipURL(project.Github.Location)
+
+		remoteName, remoteUrl, revision, err := projectSource.GetDefaultSource()
+		if err != nil {
+			return errors.Wrapf(err, "unable to get default project source for starter project %s", starterProject.Name)
+		}
+
+		if revision != "" {
+			log.Warning("Specifying 'revision' in 'checkoutFrom' is not yet supported in odo.")
+		}
+
+		downloadSpinner := log.Spinnerf("Downloading starter project %s from %s", starterProject.Name, remoteUrl)
+		defer downloadSpinner.End(false)
+
+		_, err = git.PlainClone(path, false, &git.CloneOptions{
+			URL:           remoteUrl,
+			RemoteName:    remoteName,
+			ReferenceName: plumbing.ReferenceName(revision),
+			SingleBranch:  true,
+			// we don't need history for starter projects
+			Depth: 1,
+		})
 		if err != nil {
 			return err
 		}
-		sparseDir = project.Github.SparseCheckoutDir
-	} else if project.Zip != nil {
-		url = project.Zip.Location
-		sparseDir = project.Github.SparseCheckoutDir
+
+		// we don't want to download project be a git repo
+		err = os.RemoveAll(filepath.Join(path, ".git"))
+		if err != nil {
+			// we don't need to return (fail) if this happens
+			log.Warning("Unable to delete .git from cloned starter project")
+		}
+		downloadSpinner.End(true)
+
+	} else if starterProject.Zip != nil {
+		url := starterProject.Zip.Location
+		logUrl := starterProject.Zip.Location
+		sparseDir := starterProject.Zip.SparseCheckoutDir
+		downloadSpinner := log.Spinnerf("Downloading starter project %s from %s", starterProject.Name, logUrl)
+		err := checkoutProject(sparseDir, url, path)
+		if err != nil {
+			downloadSpinner.End(false)
+			return err
+		}
+		downloadSpinner.End(true)
 	} else {
 		return errors.Errorf("Project type not supported")
-	}
-
-	err = checkoutProject(sparseDir, url, path)
-
-	if err != nil {
-		return err
 	}
 
 	return nil
 }
 
-// Run has the logic to perform the required actions as part of command
-func (co *CreateOptions) Run() (err error) {
-	if experimental.IsExperimentalModeEnabled() {
-		if co.devfileMetadata.devfileSupport {
-			// Use existing devfile directly from --devfile flag
-			if co.devfileMetadata.devfilePath.value != "" {
-				if co.devfileMetadata.devfilePath.protocol == "http(s)" {
-					// User specify devfile path is http(s) URL
-					err = util.DownloadFile(co.devfileMetadata.devfilePath.value, DevfilePath)
-					if err != nil {
-						return errors.Wrapf(err, "failed to download devfile for devfile component from %s", co.devfileMetadata.devfilePath.value)
-					}
-				} else if co.devfileMetadata.devfilePath.protocol == "file" {
-					// User specify devfile path is file system link
-					info, err := os.Stat(co.devfileMetadata.devfilePath.value)
-					if err != nil {
-						return err
-					}
-					err = util.CopyFile(co.devfileMetadata.devfilePath.value, DevfilePath, info)
-					if err != nil {
-						return errors.Wrapf(err, "failed to copy devfile from %s to %s", co.devfileMetadata.devfilePath, DevfilePath)
-					}
-				}
-			}
-
-			if !util.CheckPathExists(DevfilePath) {
-				// Download devfile from registry
-				err := util.DownloadFile(co.devfileMetadata.devfileRegistry.URL+co.devfileMetadata.devfileLink, DevfilePath)
-				if err != nil {
-					return errors.Wrapf(err, "failed to download devfile for devfile component from %s", co.devfileMetadata.devfileRegistry.URL+co.devfileMetadata.devfileLink)
-				}
-			}
-
-			if util.CheckPathExists(DevfilePath) && co.devfileMetadata.downloadSource != "" {
-				err = co.downloadProject(co.devfileMetadata.downloadSource)
-				if err != nil {
-					return errors.Wrap(err, "failed to download project for devfile component")
-				}
-			}
-
-			// Generate env file
-			err = co.EnvSpecificInfo.SetComponentSettings(envinfo.ComponentSettings{Name: co.devfileMetadata.componentName, Namespace: co.devfileMetadata.componentNamespace})
-			if err != nil {
-				return errors.Wrap(err, "failed to create env file for devfile component")
-			}
-
-			sourcePath, err := util.GetAbsPath(co.componentContext)
-			if err != nil {
-				return errors.Wrap(err, "unable to get source path")
-			}
-
-			ignoreFile, err := util.CheckGitIgnoreFile(sourcePath)
-			if err != nil {
-				return err
-			}
-
-			err = util.AddFileToIgnoreFile(ignoreFile, filepath.Join(co.componentContext, envDir))
-			if err != nil {
-				return err
-			}
-
-			log.Italic("\nPlease use `odo push` command to create the component with source deployed")
-			return nil
-		}
-	}
-
+func (co *CreateOptions) s2iRun() (err error) {
 	err = co.LocalConfigInfo.SetComponentSettings(co.componentSettings)
 	if err != nil {
 		return errors.Wrapf(err, "failed to persist the component settings to config file")
@@ -1006,6 +1002,130 @@ func (co *CreateOptions) Run() (err error) {
 	} else {
 		log.Italic("\nPlease use `odo push` command to create the component with source deployed")
 	}
+	return nil
+}
+
+// Run has the logic to perform the required actions as part of command
+func (co *CreateOptions) devfileRun() (err error) {
+	var devfileData []byte
+	// Use existing devfile directly from --devfile flag
+	if co.devfileMetadata.devfilePath.value != "" {
+		if co.devfileMetadata.devfilePath.protocol == "http(s)" {
+			// User specify devfile path is http(s) URL
+			params := util.HTTPRequestParams{
+				URL:   co.devfileMetadata.devfilePath.value,
+				Token: co.devfileMetadata.token,
+			}
+			devfileData, err = util.DownloadFileInMemory(params)
+			if err != nil {
+				return errors.Wrapf(err, "failed to download devfile for devfile component from %s", co.devfileMetadata.devfilePath.value)
+			}
+		} else if co.devfileMetadata.devfilePath.protocol == "file" {
+			devfileData, err = ioutil.ReadFile(co.devfileMetadata.devfilePath.value)
+			if err != nil {
+				return errors.Wrapf(err, "failed to read devfile from %s", co.devfileMetadata.devfilePath)
+			}
+		}
+	} else {
+		if util.CheckPathExists(DevfilePath) {
+			// if local devfile already exists read that
+			// odo create command was exected in a directory already containing devfile
+			devfileData, err = ioutil.ReadFile(DevfilePath)
+			if err != nil {
+				return errors.Wrapf(err, "failed to read devfile from %s", DevfilePath)
+			}
+		} else {
+			// Download devfile from registry
+			params := util.HTTPRequestParams{
+				URL: co.devfileMetadata.devfileRegistry.URL + co.devfileMetadata.devfileLink,
+			}
+
+			if registryUtil.IsSecure(co.devfileMetadata.devfileRegistry.Name) {
+				token, err := keyring.Get(util.CredentialPrefix+co.devfileMetadata.devfileRegistry.Name, "default")
+				if err != nil {
+					return errors.Wrap(err, "unable to get secure registry credential from keyring")
+				}
+				params.Token = token
+			}
+
+			cfg, err := preference.New()
+			if err != nil {
+				return err
+			}
+			devfileData, err = util.DownloadFileInMemoryWithCache(params, cfg.GetRegistryCacheTime())
+			if err != nil {
+				return errors.Wrapf(err, "failed to download devfile for devfile component from %s", co.devfileMetadata.devfileRegistry.URL+co.devfileMetadata.devfileLink)
+			}
+		}
+	}
+	devObj, err := devfile.ParseFromDataAndValidate(devfileData)
+	if err != nil {
+		return errors.Wrap(err, "unable to parse devfile")
+	}
+
+	err = downloadStarterProject(devObj, co.devfileMetadata.starter, co.interactive)
+	if err != nil {
+		return errors.Wrap(err, "failed to download project for devfile component")
+	}
+
+	// save devfile
+	// use original devfileData to persist original formating of the devfile file
+	err = ioutil.WriteFile(DevfilePath, devfileData, 0644) // #nosec G306
+	if err != nil {
+		return errors.Wrapf(err, "unable to save devfile to %s", DevfilePath)
+	}
+
+	// Generate env file
+	err = co.EnvSpecificInfo.SetComponentSettings(envinfo.ComponentSettings{
+		Name:      co.devfileMetadata.componentName,
+		Namespace: co.devfileMetadata.componentNamespace,
+		AppName:   co.appName,
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to create env file for devfile component")
+	}
+
+	sourcePath, err := util.GetAbsPath(co.componentContext)
+	if err != nil {
+		return errors.Wrap(err, "unable to get source path")
+	}
+
+	ignoreFile, err := util.CheckGitIgnoreFile(sourcePath)
+	if err != nil {
+		return err
+	}
+
+	err = util.AddFileToIgnoreFile(ignoreFile, filepath.Join(co.componentContext, envDir))
+	if err != nil {
+		return err
+	}
+
+	if co.now {
+		err = co.DevfilePush()
+		if err != nil {
+			return fmt.Errorf("failed to push changes: %w", err)
+		}
+	} else {
+		log.Italic("\nPlease use `odo push` command to create the component with source deployed")
+	}
+	return nil
+}
+
+// Run has the logic to perform the required actions as part of command
+func (co *CreateOptions) Run() (err error) {
+
+	// By default we run Devfile
+	if !co.forceS2i && co.devfileMetadata.devfileSupport {
+		return co.devfileRun()
+	}
+
+	// If not, we run s2i (if the --s2i parameter has been passed in).
+	// It's implied that we have passed it in if Devfile did not run above
+	err = co.s2iRun()
+	if err != nil {
+		return err
+	}
+
 	if log.IsJSON() {
 		var componentDesc component.Component
 		co.Context, co.LocalConfigInfo, err = genericclioptions.UpdatedContext(co.Context)
@@ -1033,33 +1153,6 @@ func (co *CreateOptions) Run() (err error) {
 	return
 }
 
-// The general cpu/memory is used as a fallback when it's set and both min-cpu/memory max-cpu/memory are not set
-// when the only thing specified is the min or max value, we exit the application
-func ensureAndLogProperResourceUsage(resource, resourceMin, resourceMax, resourceName string) {
-	if strings.HasPrefix(resourceMin, "-") {
-		log.Errorf("min-%s cannot be negative", resource)
-		os.Exit(1)
-	}
-	if strings.HasPrefix(resourceMax, "-") {
-		log.Errorf("max-%s cannot be negative", resource)
-		os.Exit(1)
-	}
-	if strings.HasPrefix(resource, "-") {
-		log.Errorf("%s cannot be negative", resource)
-		os.Exit(1)
-	}
-	if resourceMin != "" && resourceMax != "" && resource != "" {
-		log.Infof("`--%s` will be ignored as `--min-%s` and `--max-%s` has been passed\n", resourceName, resourceName, resourceName)
-	}
-	if (resourceMin == "") != (resourceMax == "") && resource != "" {
-		log.Infof("Using `--%s` %s for min and max limits.\n", resourceName, resource)
-	}
-	if (resourceMin == "") != (resourceMax == "") && resource == "" {
-		log.Errorf("`--min-%s` should accompany `--max-%s` or pass `--%s` to use same value for both min and max or try not passing any of them\n", resourceName, resourceName, resourceName)
-		os.Exit(1)
-	}
-}
-
 func checkoutProject(sparseCheckoutDir, zipURL, path string) error {
 
 	if sparseCheckoutDir != "" {
@@ -1075,6 +1168,60 @@ func checkoutProject(sparseCheckoutDir, zipURL, path string) error {
 		}
 	}
 	return nil
+}
+
+// getStarterProjectInteractiveMode gets starter project value by asking user in interactive mode.
+func getStarterProjectInteractiveMode(projects []common.DevfileStarterProject) *common.DevfileStarterProject {
+	projectName := ui.SelectStarterProject(projects)
+
+	// if user do not wish to download starter project or there are no projects in devfile, project name would be empty
+	if projectName == "" {
+		return nil
+	}
+
+	var project common.DevfileStarterProject
+
+	for _, value := range projects {
+		if value.Name == projectName {
+			project = value
+			break
+		}
+	}
+
+	return &project
+}
+
+// getStarterProjectFromFlag gets starter project value from flag --starter.
+func getStarterProjectFromFlag(projects []common.DevfileStarterProject, projectPassed string) (project *common.DevfileStarterProject, err error) {
+
+	nOfProjects := len(projects)
+
+	if nOfProjects == 0 {
+		return nil, errors.Errorf("no starter project found in devfile.")
+	}
+
+	// Determine what project to be used
+	if nOfProjects == 1 && projectPassed == defaultStarterProjectName {
+		project = &projects[0]
+	} else if nOfProjects > 1 && projectPassed == defaultStarterProjectName {
+		project = &projects[0]
+		log.Warning("There are multiple projects in this devfile but none have been specified in --starter. Downloading the first: " + project.Name)
+	} else { //If the user has specified a project
+		projectFound := false
+		for indexOfProject, projectInfo := range projects {
+			if projectInfo.Name == projectPassed { //Get the index
+				project = &projects[indexOfProject]
+				projectFound = true
+			}
+		}
+
+		if !projectFound {
+			return nil, errors.Errorf("the project: %s specified in --starter does not exist", projectPassed)
+		}
+	}
+
+	return project, err
+
 }
 
 // NewCmdCreate implements the create odo command
@@ -1093,23 +1240,17 @@ func NewCmdCreate(name, fullName string) *cobra.Command {
 	}
 	componentCreateCmd.Flags().StringVarP(&co.componentBinary, "binary", "b", "", "Create a binary file component component using given artifact. Works only with Java components. File needs to be in the context directory.")
 	componentCreateCmd.Flags().StringVarP(&co.componentGit, "git", "g", "", "Create a git component using this repository.")
-	componentCreateCmd.Flags().StringVarP(&co.componentGitRef, "ref", "r", "", "Use a specific ref e.g. commit, branch or tag of the git repository")
+	componentCreateCmd.Flags().StringVarP(&co.componentGitRef, "ref", "r", "", "Use a specific ref e.g. commit, branch or tag of the git repository (only valid for --git components)")
 	genericclioptions.AddContextFlag(componentCreateCmd, &co.componentContext)
-	componentCreateCmd.Flags().StringVar(&co.memory, "memory", "", "Amount of memory to be allocated to the component. ex. 100Mi (sets min-memory and max-memory to this value)")
-	componentCreateCmd.Flags().StringVar(&co.memoryMin, "min-memory", "", "Limit minimum amount of memory to be allocated to the component. ex. 100Mi")
-	componentCreateCmd.Flags().StringVar(&co.memoryMax, "max-memory", "", "Limit maximum amount of memory to be allocated to the component. ex. 100Mi")
-	componentCreateCmd.Flags().StringVar(&co.cpu, "cpu", "", "Amount of cpu to be allocated to the component. ex. 100m or 0.1 (sets min-cpu and max-cpu to this value)")
-	componentCreateCmd.Flags().StringVar(&co.cpuMin, "min-cpu", "", "Limit minimum amount of cpu to be allocated to the component. ex. 100m")
-	componentCreateCmd.Flags().StringVar(&co.cpuMax, "max-cpu", "", "Limit maximum amount of cpu to be allocated to the component. ex. 1")
 	componentCreateCmd.Flags().StringSliceVarP(&co.componentPorts, "port", "p", []string{}, "Ports to be used when the component is created (ex. 8080,8100/tcp,9100/udp)")
 	componentCreateCmd.Flags().StringSliceVar(&co.componentEnvVars, "env", []string{}, "Environmental variables for the component. For example --env VariableName=Value")
 
-	if experimental.IsExperimentalModeEnabled() {
-		componentCreateCmd.Flags().StringVar(&co.devfileMetadata.downloadSource, "downloadSource", "", "Download sample project from devfile.")
-		componentCreateCmd.Flags().Lookup("downloadSource").NoOptDefVal = defaultProjectName //Default value to pass to the flag if one is not specified.
-		componentCreateCmd.Flags().StringVar(&co.devfileMetadata.devfileRegistry.Name, "registry", "", "Create devfile component from specific registry")
-		componentCreateCmd.Flags().StringVar(&co.devfileMetadata.devfilePath.value, "devfile", "", "Path to the user specify devfile")
-	}
+	componentCreateCmd.Flags().StringVar(&co.devfileMetadata.starter, "starter", "", "Download a project specified in the devfile")
+	componentCreateCmd.Flags().Lookup("starter").NoOptDefVal = defaultStarterProjectName //Default value to pass to the flag if one is not specified.
+	componentCreateCmd.Flags().StringVar(&co.devfileMetadata.devfileRegistry.Name, "registry", "", "Create devfile component from specific registry")
+	componentCreateCmd.Flags().StringVar(&co.devfileMetadata.devfilePath.value, "devfile", "", "Path to the user specified devfile")
+	componentCreateCmd.Flags().StringVar(&co.devfileMetadata.token, "token", "", "Token to be used when downloading devfile from the devfile path that is specified via --devfile")
+	componentCreateCmd.Flags().BoolVar(&co.forceS2i, "s2i", false, "Enforce S2I type components")
 
 	componentCreateCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)
 

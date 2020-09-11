@@ -1,12 +1,11 @@
 package validate
 
 import (
-	"reflect"
+	"fmt"
 
 	"github.com/openshift/odo/pkg/devfile/parser/data/common"
 	"k8s.io/klog"
 
-	v100 "github.com/openshift/odo/pkg/devfile/parser/data/1.0.0"
 	v200 "github.com/openshift/odo/pkg/devfile/parser/data/2.0.0"
 )
 
@@ -14,25 +13,25 @@ import (
 func ValidateDevfileData(data interface{}) error {
 	var components []common.DevfileComponent
 
-	typeData := reflect.TypeOf(data)
-
-	if typeData == reflect.TypeOf(&v100.Devfile100{}) {
-		d := data.(*v100.Devfile100)
+	switch d := data.(type) {
+	case *v200.Devfile200:
 		components = d.GetComponents()
-	}
 
-	if typeData == reflect.TypeOf(&v200.Devfile200{}) {
-		d := data.(*v200.Devfile200)
-		components = d.GetComponents()
+		// Validate Events
+		if err := validateEvents(d); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown devfile type %T", d)
 	}
 
 	// Validate Components
-	if err := ValidateComponents(components); err != nil {
+	if err := validateComponents(components); err != nil {
 		return err
 	}
 
 	// Successful
-	klog.V(4).Info("Successfully validated devfile sections")
+	klog.V(2).Info("Successfully validated devfile sections")
 	return nil
 
 }

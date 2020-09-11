@@ -11,6 +11,7 @@ import (
 	"github.com/openshift/odo/pkg/odo/cli/component"
 	"github.com/openshift/odo/pkg/odo/cli/config"
 	"github.com/openshift/odo/pkg/odo/cli/debug"
+	"github.com/openshift/odo/pkg/odo/cli/env"
 	"github.com/openshift/odo/pkg/odo/cli/login"
 	"github.com/openshift/odo/pkg/odo/cli/logout"
 	"github.com/openshift/odo/pkg/odo/cli/plugins"
@@ -158,6 +159,11 @@ func odoRootCmd(name, fullName string) *cobra.Command {
 	_ = pflag.CommandLine.MarkHidden("log_dir")
 	_ = pflag.CommandLine.MarkHidden("logtostderr")
 	_ = pflag.CommandLine.MarkHidden("stderrthreshold")
+	_ = pflag.CommandLine.MarkHidden("add_dir_header")
+	_ = pflag.CommandLine.MarkHidden("log_file")
+	_ = pflag.CommandLine.MarkHidden("log_file_max_size")
+	_ = pflag.CommandLine.MarkHidden("skip_headers")
+	_ = pflag.CommandLine.MarkHidden("skip_log_headers")
 
 	// We will mark the command as hidden and then re-enable if the command
 	// supports json output
@@ -186,6 +192,7 @@ func odoRootCmd(name, fullName string) *cobra.Command {
 		component.NewCmdPush(component.PushRecommendedCommandName, util.GetFullName(fullName, component.PushRecommendedCommandName)),
 		component.NewCmdUpdate(component.UpdateRecommendedCommandName, util.GetFullName(fullName, component.UpdateRecommendedCommandName)),
 		component.NewCmdWatch(component.WatchRecommendedCommandName, util.GetFullName(fullName, component.WatchRecommendedCommandName)),
+		component.NewCmdExec(component.ExecRecommendedCommandName, util.GetFullName(fullName, component.ExecRecommendedCommandName)),
 		login.NewCmdLogin(login.RecommendedCommandName, util.GetFullName(fullName, login.RecommendedCommandName)),
 		logout.NewCmdLogout(logout.RecommendedCommandName, util.GetFullName(fullName, logout.RecommendedCommandName)),
 		project.NewCmdProject(project.RecommendedCommandName, util.GetFullName(fullName, project.RecommendedCommandName)),
@@ -197,11 +204,13 @@ func odoRootCmd(name, fullName string) *cobra.Command {
 		config.NewCmdConfiguration(config.RecommendedCommandName, util.GetFullName(fullName, config.RecommendedCommandName)),
 		preference.NewCmdPreference(preference.RecommendedCommandName, util.GetFullName(fullName, preference.RecommendedCommandName)),
 		debug.NewCmdDebug(debug.RecommendedCommandName, util.GetFullName(fullName, debug.RecommendedCommandName)),
+		registry.NewCmdRegistry(registry.RecommendedCommandName, util.GetFullName(fullName, registry.RecommendedCommandName)),
+		component.NewCmdTest(component.TestRecommendedCommandName, util.GetFullName(fullName, component.TestRecommendedCommandName)),
+		env.NewCmdEnv(env.RecommendedCommandName, util.GetFullName(fullName, env.RecommendedCommandName)),
 	)
-
 	if experimental.IsExperimentalModeEnabled() {
 		rootCmd.AddCommand(
-			registry.NewCmdRegistry(registry.RecommendedCommandName, util.GetFullName(fullName, registry.RecommendedCommandName)),
+			component.NewCmdDeploy(component.DeployRecommendedCommandName, util.GetFullName(fullName, component.DeployRecommendedCommandName)),
 		)
 	}
 
@@ -221,6 +230,7 @@ func reconfigureCmdWithSubcmd(cmd *cobra.Command) {
 	if cmd.Args == nil {
 		cmd.Args = cobra.ArbitraryArgs
 	}
+
 	if cmd.RunE == nil {
 		cmd.RunE = ShowSubcommands
 	}
@@ -263,6 +273,5 @@ func ShowHelp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	_ = cmd.Help()
 	return fmt.Errorf("Invalid command - see available commands/subcommands above")
 }

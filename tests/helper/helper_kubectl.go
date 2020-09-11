@@ -2,7 +2,6 @@ package helper
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -30,6 +29,17 @@ func (kubectl KubectlRunner) Run(cmd string) *gexec.Session {
 	return session
 }
 
+// Exec allows generic execution of commands, returning the contents of stdout
+func (kubectl KubectlRunner) Exec(podName string, projectName string, args ...string) string {
+
+	cmd := []string{"exec", podName, "--namespace", projectName}
+
+	cmd = append(cmd, args...)
+
+	stdOut := CmdShouldPass(kubectl.path, cmd...)
+	return stdOut
+}
+
 // ExecListDir returns dir list in specified location of pod
 func (kubectl KubectlRunner) ExecListDir(podName string, projectName string, dir string) string {
 	stdOut := CmdShouldPass(kubectl.path, "exec", podName, "--namespace", projectName,
@@ -48,7 +58,7 @@ func (kubectl KubectlRunner) CheckCmdOpInRemoteDevfilePod(podName string, contai
 	session := CmdRunner(kubectl.path, args...)
 	stdOut := string(session.Wait().Out.Contents())
 	stdErr := string(session.Wait().Err.Contents())
-	if stdErr != "" {
+	if stdErr != "" && session.ExitCode() != 0 {
 		return checkOp(stdOut, fmt.Errorf("cmd %s failed with error %s on pod %s", cmd, stdErr, podName))
 	}
 	return checkOp(stdOut, nil)
@@ -57,10 +67,23 @@ func (kubectl KubectlRunner) CheckCmdOpInRemoteDevfilePod(podName string, contai
 // GetRunningPodNameByComponent executes kubectl command and returns the running pod name of a delopyed
 // devfile component by passing component name as a argument
 func (kubectl KubectlRunner) GetRunningPodNameByComponent(compName string, namespace string) string {
-	stdOut := CmdShouldPass(kubectl.path, "get", "pods", "--namespace", namespace, "--show-labels")
-	re := regexp.MustCompile(`(` + compName + `-\S+)\s+\S+\s+Running.*component=` + compName)
-	podName := re.FindStringSubmatch(stdOut)[1]
-	return strings.TrimSpace(podName)
+	selector := fmt.Sprintf("--selector=component=%s", compName)
+	stdOut := CmdShouldPass(kubectl.path, "get", "pods", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].metadata.name}")
+	return strings.TrimSpace(stdOut)
+}
+
+// GetPVCSize executes kubectl command and returns the bound storage size
+func (kubectl KubectlRunner) GetPVCSize(compName, storageName, namespace string) string {
+	selector := fmt.Sprintf("--selector=storage-name=%s,component=%s", storageName, compName)
+	stdOut := CmdShouldPass(kubectl.path, "get", "pvc", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].spec.resources.requests.storage}")
+	return strings.TrimSpace(stdOut)
+}
+
+// GetPodInitContainers executes kubectl command and returns the init containers of the pod
+func (kubectl KubectlRunner) GetPodInitContainers(compName string, namespace string) []string {
+	selector := fmt.Sprintf("--selector=component=%s", compName)
+	stdOut := CmdShouldPass(kubectl.path, "get", "pods", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].spec.initContainers[*].name}")
+	return strings.Split(stdOut, " ")
 }
 
 // GetVolumeMountNamesandPathsFromContainer returns the volume name and mount path in the format name:path\n
@@ -120,4 +143,30 @@ func (kubectl KubectlRunner) CreateRandNamespaceProject() string {
 func (kubectl KubectlRunner) DeleteNamespaceProject(projectName string) {
 	fmt.Fprintf(GinkgoWriter, "Deleting project: %s\n", projectName)
 	CmdShouldPass("kubectl", "delete", "namespaces", projectName)
+}
+
+func (kubectl KubectlRunner) GetEnvsDevFileDeployment(componentName string, projectName string) map[string]string {
+	var mapOutput = make(map[string]string)
+
+	output := CmdShouldPass(kubectl.path, "get", "deployment", componentName, "--namespace", projectName,
+		"-o", "jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}:{.value}{\"\\n\"}{end}'")
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimPrefix(line, "'")
+		splits := strings.Split(line, ":")
+		name := splits[0]
+		value := strings.Join(splits[1:], ":")
+		mapOutput[name] = value
+	}
+	return mapOutput
+}
+
+func (kubectl KubectlRunner) GetAllPVCNames(namespace string) []string {
+	session := CmdRunner(kubectl.path, "get", "pvc", "--namespace", namespace, "-o", "jsonpath={.items[*].metadata.name}")
+	Eventually(session).Should(gexec.Exit(0))
+	output := string(session.Wait().Out.Contents())
+	if output == "" {
+		return []string{}
+	}
+	return strings.Split(output, " ")
 }

@@ -109,6 +109,19 @@ func (oc OcRunner) GetComponentDC(component string, app string, project string) 
 	return ""
 }
 
+func (oc OcRunner) GetInternalRegistryURL() string {
+	session := CmdRunner(oc.path, "get", "svc",
+		"-l", "docker-registry",
+		"--all-namespaces",
+		"-o=jsonpath={range .items[0]}{@.spec.clusterIP}:{@.spec.ports[0].port}")
+
+	session.Wait()
+	if session.ExitCode() == 0 {
+		return string(session.Out.Contents())
+	}
+	return ""
+}
+
 // SourceTest checks the component-source-type and the source url in the annotation of the bc and dc
 // appTestName is the name of the app
 // sourceType is the type of the source of the component i.e git/binary/local
@@ -132,6 +145,17 @@ func (oc OcRunner) ExecListDir(podName string, projectName string, dir string) s
 	return stdOut
 }
 
+// Exec allows generic execution of commands, returning the contents of stdout
+func (oc OcRunner) Exec(podName string, projectName string, args ...string) string {
+
+	cmd := []string{"exec", podName, "--namespace", projectName}
+
+	cmd = append(cmd, args...)
+
+	stdOut := CmdShouldPass(oc.path, cmd...)
+	return stdOut
+}
+
 // CheckCmdOpInRemoteCmpPod runs the provided command on remote component pod and returns the return value of command output handler function passed to it
 func (oc OcRunner) CheckCmdOpInRemoteCmpPod(cmpName string, appName string, prjName string, cmd []string, checkOp func(cmdOp string, err error) bool) bool {
 	cmpDCName := fmt.Sprintf("%s-%s", cmpName, appName)
@@ -143,7 +167,7 @@ func (oc OcRunner) CheckCmdOpInRemoteCmpPod(cmpName string, appName string, prjN
 		"-c", cmpDCName, "--"}, cmd...)...)
 	stdOut := string(session.Wait().Out.Contents())
 	stdErr := string(session.Wait().Err.Contents())
-	if stdErr != "" {
+	if stdErr != "" && session.ExitCode() != 0 {
 		return checkOp(stdOut, fmt.Errorf("cmd %s failed with error %s on pod %s", cmd, stdErr, podName))
 	}
 	return checkOp(stdOut, nil)
@@ -160,7 +184,7 @@ func (oc OcRunner) CheckCmdOpInRemoteDevfilePod(podName string, containerName st
 	session := CmdRunner(oc.path, args...)
 	stdOut := string(session.Wait().Out.Contents())
 	stdErr := string(session.Wait().Err.Contents())
-	if stdErr != "" {
+	if stdErr != "" && session.ExitCode() != 0 {
 		return checkOp(stdOut, fmt.Errorf("cmd %s failed with error %s on pod %s", cmd, stdErr, podName))
 	}
 	return checkOp(stdOut, nil)
@@ -275,10 +299,10 @@ func (oc OcRunner) SourceLocationBC(componentName string, appName string, projec
 	return sourceLocation
 }
 
-// checkForImageStream checks if there is a ImageStram with name and tag in openshift namespace
-func (oc OcRunner) checkForImageStream(name string, tag string) bool {
+// CheckForImageStream checks if there is a ImageStram with name and tag in the specified namespace
+func (oc OcRunner) CheckForImageStream(namespace string, name string, tag string) bool {
 	// first check if there is ImageStream with given name
-	names := strings.Trim(CmdShouldPass(oc.path, "get", "is", "-n", "openshift",
+	names := strings.Trim(CmdShouldPass(oc.path, "get", "is", "-n", namespace,
 		"-o", "jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'"), "'")
 	scanner := bufio.NewScanner(strings.NewReader(names))
 	namePresent := false
@@ -290,8 +314,8 @@ func (oc OcRunner) checkForImageStream(name string, tag string) bool {
 	tagPresent := false
 	// if there is a ImageStream check if there is a given tag
 	if namePresent {
-		tags := strings.Trim(CmdShouldPass(oc.path, "get", "is", name, "-n", "openshift",
-			"-o", "jsonpath='{range .spec.tags[*]}{.name}{\"\\n\"}{end}'"), "'")
+		tags := strings.Trim(CmdShouldPass(oc.path, "get", "is", name, "-n", namespace,
+			"-o", "jsonpath='{range .status.tags[*]}{.tag}{\"\\n\"}{end}'"), "'")
 		scanner := bufio.NewScanner(strings.NewReader(tags))
 		for scanner.Scan() {
 			if scanner.Text() == tag {
@@ -316,7 +340,7 @@ func (oc OcRunner) ImportImageFromRegistry(registry, image, cmpType, project str
 // ImportJavaIS import the openjdk image which is used for jars
 func (oc OcRunner) ImportJavaIS(project string) {
 	// if ImageStram already exists, no need to do anything
-	if oc.checkForImageStream("java", "8") {
+	if oc.CheckForImageStream("openshift", "java", "8") {
 		return
 	}
 
@@ -331,7 +355,7 @@ func (oc OcRunner) ImportJavaIS(project string) {
 // ImportDotnet20IS import the dotnet image
 func (oc OcRunner) ImportDotnet20IS(project string) {
 	// if ImageStram already exists, no need to do anything
-	if oc.checkForImageStream("dotnet", "2.0") {
+	if oc.CheckForImageStream("openshift", "dotnet", "2.0") {
 		return
 	}
 
@@ -373,10 +397,23 @@ func (oc OcRunner) GetRunningPodNameOfComp(compName string, namespace string) st
 // GetRunningPodNameByComponent executes oc command and returns the running pod name of a delopyed
 // devfile component by passing component name as a argument
 func (oc OcRunner) GetRunningPodNameByComponent(compName string, namespace string) string {
-	stdOut := CmdShouldPass(oc.path, "get", "pods", "--namespace", namespace, "--show-labels")
-	re := regexp.MustCompile(`(` + compName + `-\S+)\s+\S+\s+Running.*component=` + compName)
-	podName := re.FindStringSubmatch(stdOut)[1]
-	return strings.TrimSpace(podName)
+	selector := fmt.Sprintf("--selector=component=%s", compName)
+	stdOut := CmdShouldPass(oc.path, "get", "pods", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].metadata.name}")
+	return strings.TrimSpace(stdOut)
+}
+
+// GetPVCSize executes oc command and returns the bound storage size
+func (oc OcRunner) GetPVCSize(compName, storageName, namespace string) string {
+	selector := fmt.Sprintf("--selector=storage-name=%s,component=%s", storageName, compName)
+	stdOut := CmdShouldPass(oc.path, "get", "pvc", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].spec.resources.requests.storage}")
+	return strings.TrimSpace(stdOut)
+}
+
+// GetPodInitContainers executes oc command and returns the init containers of the pod
+func (oc OcRunner) GetPodInitContainers(compName string, namespace string) []string {
+	selector := fmt.Sprintf("--selector=component=%s", compName)
+	stdOut := CmdShouldPass(oc.path, "get", "pods", "--namespace", namespace, selector, "-o", "jsonpath={.items[*].spec.initContainers[*].name}")
+	return strings.Split(stdOut, " ")
 }
 
 // GetRoute returns route URL
@@ -468,6 +505,22 @@ func (oc OcRunner) GetEnvs(componentName string, appName string, projectName str
 	return mapOutput
 }
 
+func (oc OcRunner) GetEnvsDevFileDeployment(componentName string, projectName string) map[string]string {
+	var mapOutput = make(map[string]string)
+
+	output := CmdShouldPass(oc.path, "get", "deployment", componentName, "--namespace", projectName,
+		"-o", "jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}:{.value}{\"\\n\"}{end}'")
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimPrefix(line, "'")
+		splits := strings.Split(line, ":")
+		name := splits[0]
+		value := strings.Join(splits[1:], ":")
+		mapOutput[name] = value
+	}
+	return mapOutput
+}
+
 // WaitForDCRollout wait for DeploymentConfig to finish active rollout
 // timeout is a maximum wait time in seconds
 func (oc OcRunner) WaitForDCRollout(dcName string, project string, timeout time.Duration) {
@@ -535,4 +588,14 @@ func (oc OcRunner) DeleteNamespaceProject(projectName string) {
 	fmt.Fprintf(GinkgoWriter, "Deleting project: %s\n", projectName)
 	session := CmdShouldPass("odo", "project", "delete", projectName, "-f")
 	Expect(session).To(ContainSubstring("Deleted project : " + projectName))
+}
+
+func (oc OcRunner) GetAllPVCNames(namespace string) []string {
+	session := CmdRunner(oc.path, "get", "pvc", "--namespace", namespace, "-o", "jsonpath={.items[*].metadata.name}")
+	Eventually(session).Should(gexec.Exit(0))
+	output := string(session.Wait().Out.Contents())
+	if output == "" {
+		return []string{}
+	}
+	return strings.Split(output, " ")
 }

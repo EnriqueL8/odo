@@ -2,7 +2,7 @@ package common
 
 import (
 	"os"
-	"strconv"
+	"strings"
 
 	"k8s.io/klog"
 
@@ -13,6 +13,9 @@ import (
 
 // PredefinedDevfileCommands encapsulates constants for predefined devfile commands
 type PredefinedDevfileCommands string
+
+// DevfileEventType encapsulates constants for devfile events
+type DevfileEventType string
 
 const (
 	// DefaultDevfileInitCommand is a predefined devfile command for init
@@ -32,7 +35,7 @@ const (
 
 	// Default Image that will be used containing the supervisord binary and assembly scripts
 	// use GetBootstrapperImage() function instead of this variable
-	defaultBootstrapperImage = "registry.access.redhat.com/openshiftdo/odo-init-image-rhel7:1.1.3"
+	defaultBootstrapperImage = "registry.access.redhat.com/ocp-tools-4/odo-init-container-rhel8:1.1.5"
 
 	// SupervisordControlCommand sub command which stands for control
 	SupervisordControlCommand = "ctl"
@@ -59,10 +62,10 @@ const (
 	BinBash = "/bin/sh"
 
 	// Default volume size for volumes defined in a devfile
-	volumeSize = "5Gi"
+	DefaultVolumeSize = "1Gi"
 
-	// EnvCheProjectsRoot is the env defined for /projects where component mountSources=true
-	EnvCheProjectsRoot = "CHE_PROJECTS_ROOT"
+	// EnvProjectsRoot is the env defined for /projects where component mountSources=true
+	EnvProjectsRoot = "PROJECTS_ROOT"
 
 	// EnvOdoCommandRunWorkingDir is the env defined in the runtime component container which holds the work dir for the run command
 	EnvOdoCommandRunWorkingDir = "ODO_COMMAND_RUN_WORKING_DIR"
@@ -84,6 +87,18 @@ const (
 
 	// SupervisordCtlSubCommand is the supervisord sub command ctl
 	SupervisordCtlSubCommand = "ctl"
+
+	// PreStart is a devfile event
+	PreStart DevfileEventType = "preStart"
+
+	// PostStart is a devfile event
+	PostStart DevfileEventType = "postStart"
+
+	// PreStop is a devfile event
+	PreStop DevfileEventType = "preStop"
+
+	// PostStop is a devfile event
+	PostStop DevfileEventType = "postStop"
 )
 
 // CommandNames is a struct to store the default and adapter names for devfile commands
@@ -92,10 +107,20 @@ type CommandNames struct {
 	AdapterName string
 }
 
-func isComponentSupported(component common.DevfileComponent) bool {
+// isContainer checks if the component is a container
+func isContainer(component common.DevfileComponent) bool {
 	// Currently odo only uses devfile components of type container, since most of the Che registry devfiles use it
 	if component.Container != nil {
-		klog.V(4).Infof("Found component \"%v\" with name \"%v\"\n", common.ContainerComponentType, component.Container.Name)
+		klog.V(2).Infof("Found component \"%v\" with name \"%v\"\n", common.ContainerComponentType, component.Name)
+		return true
+	}
+	return false
+}
+
+// isVolume checks if the component is a volume
+func isVolume(component common.DevfileComponent) bool {
+	if component.Volume != nil {
+		klog.V(2).Infof("Found component \"%v\" with name \"%v\"\n", common.VolumeComponentType, component.Name)
 		return true
 	}
 	return false
@@ -109,16 +134,28 @@ func GetBootstrapperImage() string {
 	return defaultBootstrapperImage
 }
 
-// GetSupportedComponents iterates through the components in the devfile and returns a list of odo supported components
-func GetSupportedComponents(data data.DevfileData) []common.DevfileComponent {
+// GetDevfileContainerComponents iterates through the components in the devfile and returns a list of devfile container components
+func GetDevfileContainerComponents(data data.DevfileData) []common.DevfileComponent {
 	var components []common.DevfileComponent
 	// Only components with aliases are considered because without an alias commands cannot reference them
 	for _, comp := range data.GetAliasedComponents() {
-		if isComponentSupported(comp) {
+		if isContainer(comp) {
 			components = append(components, comp)
 		}
 	}
 	return components
+}
+
+// GetDevfileVolumeComponents iterates through the components in the devfile and returns a map of devfile volume components
+func GetDevfileVolumeComponents(data data.DevfileData) map[string]common.DevfileComponent {
+	volumeNameToVolumeComponent := make(map[string]common.DevfileComponent)
+	// Only components with aliases are considered because without an alias commands cannot reference them
+	for _, comp := range data.GetComponents() {
+		if isVolume(comp) {
+			volumeNameToVolumeComponent[comp.Name] = comp
+		}
+	}
+	return volumeNameToVolumeComponent
 }
 
 // getCommandsByGroup gets commands by the group kind
@@ -126,7 +163,8 @@ func getCommandsByGroup(data data.DevfileData, groupType common.DevfileCommandGr
 	var commands []common.DevfileCommand
 
 	for _, command := range data.GetCommands() {
-		if command.Exec != nil && command.Exec.Group != nil && command.Exec.Group.Kind == groupType {
+		commandGroup := command.GetGroup()
+		if commandGroup != nil && commandGroup.Kind == groupType {
 			commands = append(commands, command)
 		}
 	}
@@ -134,24 +172,43 @@ func getCommandsByGroup(data data.DevfileData, groupType common.DevfileCommandGr
 	return commands
 }
 
-// GetVolumes iterates through the components in the devfile and returns a map of component alias to the devfile volumes
+// GetVolumes iterates through the components in the devfile and returns a map of container name to the devfile volumes
 func GetVolumes(devfileObj devfileParser.DevfileObj) map[string][]DevfileVolume {
-	// componentAliasToVolumes is a map of the Devfile Component Alias to the Devfile Component Volumes
-	componentAliasToVolumes := make(map[string][]DevfileVolume)
-	size := volumeSize
-	for _, comp := range GetSupportedComponents(devfileObj.Data) {
-		if len(comp.Container.VolumeMounts) != 0 {
-			for _, volume := range comp.Container.VolumeMounts {
-				vol := DevfileVolume{
-					Name:          volume.Name,
-					ContainerPath: volume.Path,
-					Size:          size,
+	containerComponents := GetDevfileContainerComponents(devfileObj.Data)
+	volumeNameToVolumeComponent := GetDevfileVolumeComponents(devfileObj.Data)
+
+	// containerNameToVolumes is a map of the Devfile container name to the Devfile container Volumes
+	containerNameToVolumes := make(map[string][]DevfileVolume)
+	for _, containerComp := range containerComponents {
+		for _, volumeMount := range containerComp.Container.VolumeMounts {
+			size := DefaultVolumeSize
+
+			// check if there is a volume component name against the container component volume mount name
+			if volumeComp, ok := volumeNameToVolumeComponent[volumeMount.Name]; ok {
+				// If there is a volume size mentioned in the devfile, use it
+				if len(volumeComp.Volume.Size) > 0 {
+					size = volumeComp.Volume.Size
 				}
-				componentAliasToVolumes[comp.Container.Name] = append(componentAliasToVolumes[comp.Container.Name], vol)
 			}
+
+			vol := DevfileVolume{
+				Name:          volumeMount.Name,
+				ContainerPath: volumeMount.Path,
+				Size:          size,
+			}
+			containerNameToVolumes[containerComp.Name] = append(containerNameToVolumes[containerComp.Name], vol)
 		}
 	}
-	return componentAliasToVolumes
+	return containerNameToVolumes
+}
+
+// IsRestartRequired checks if restart required for run command
+func IsRestartRequired(hotReload bool, runModeChanged bool) bool {
+	if runModeChanged || !hotReload {
+		return true
+	}
+
+	return false
 }
 
 // IsEnvPresent checks if the env variable is present in an array of env variables
@@ -176,18 +233,35 @@ func IsPortPresent(endpoints []common.Endpoint, port int) bool {
 	return false
 }
 
-// IsRestartRequired returns if restart is required for devrun command
-func IsRestartRequired(command common.DevfileCommand) bool {
-	var restart = true
-	var err error
-	rs, ok := command.Exec.Attributes["restart"]
-	if ok {
-		restart, err = strconv.ParseBool(rs)
-		// Ignoring error here as restart is true for all error and default cases.
-		if err != nil {
-			klog.V(4).Info("Error converting restart attribute to bool")
+// GetComponentEnvVar returns true if a list of env vars contains the specified env var
+// If the env exists, it returns the value of it
+func GetComponentEnvVar(env string, envs []common.Env) string {
+	for _, envVar := range envs {
+		if envVar.Name == env {
+			return envVar.Value
+		}
+	}
+	return ""
+}
+
+// GetCommandsFromEvent returns the list of commands from the event name.
+// If the event is a composite command, it returns the sub-commands from the tree
+func GetCommandsFromEvent(commandsMap map[string]common.DevfileCommand, eventName string) []string {
+	var commands []string
+
+	if command, ok := commandsMap[eventName]; ok {
+		if command.IsComposite() {
+			klog.V(4).Infof("%s is a composite command", command.GetID())
+			for _, compositeSubCmd := range command.Composite.Commands {
+				klog.V(4).Infof("checking if sub-command %s is either an exec or a composite command ", compositeSubCmd)
+				subCommands := GetCommandsFromEvent(commandsMap, strings.ToLower(compositeSubCmd))
+				commands = append(commands, subCommands...)
+			}
+		} else {
+			klog.V(4).Infof("%s is an exec command", command.GetID())
+			commands = append(commands, command.GetID())
 		}
 	}
 
-	return restart
+	return commands
 }

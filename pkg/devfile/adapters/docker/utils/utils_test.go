@@ -35,8 +35,8 @@ func TestComponentExists(t *testing.T) {
 			componentName: "golang",
 			client:        fakeClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
-				testingutil.GetFakeComponent("alias2"),
+				testingutil.GetFakeContainerComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias2"),
 			},
 			want:    true,
 			wantErr: false,
@@ -46,7 +46,7 @@ func TestComponentExists(t *testing.T) {
 			componentName: "fakecomponent",
 			client:        fakeClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias1"),
 			},
 			want:    false,
 			wantErr: false,
@@ -56,7 +56,7 @@ func TestComponentExists(t *testing.T) {
 			componentName: "golang",
 			client:        fakeErrorClient,
 			components: []common.DevfileComponent{
-				testingutil.GetFakeComponent("alias1"),
+				testingutil.GetFakeContainerComponent("alias1"),
 			},
 			want:    false,
 			wantErr: true,
@@ -66,12 +66,12 @@ func TestComponentExists(t *testing.T) {
 			componentName: "test",
 			client:        fakeClient,
 			components:    []common.DevfileComponent{},
-			want:          false,
+			want:          true,
 			wantErr:       true,
 		},
 		{
 			name:          "Case 5: Devfile does not have supported components",
-			componentName: "golang",
+			componentName: "abc",
 			client:        fakeClient,
 			components: []common.DevfileComponent{
 				{
@@ -86,7 +86,7 @@ func TestComponentExists(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: tt.components,
 				},
 			}
@@ -95,6 +95,8 @@ func TestComponentExists(t *testing.T) {
 				t.Errorf("TestComponentExists error, unexpected error - %v", err)
 			} else if !tt.wantErr && tt.want != cmpExists {
 				t.Errorf("expected %v, wanted %v", cmpExists, tt.want)
+			} else if tt.wantErr && tt.want != cmpExists {
+				t.Errorf("expected %v, wanted %v, err %v", cmpExists, tt.want, err)
 			}
 		})
 	}
@@ -125,6 +127,7 @@ func TestGetComponentContainers(t *testing.T) {
 				},
 				Mounts: []types.MountPoint{
 					{
+						Name:        lclient.ProjectSourceVolumeName,
 						Destination: lclient.OdoSourceVolumeMount,
 					},
 				},

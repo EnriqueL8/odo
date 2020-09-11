@@ -3,15 +3,18 @@ package service
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/openshift/odo/pkg/log"
 	"github.com/openshift/odo/pkg/machineoutput"
+	"github.com/openshift/odo/pkg/odo/cli/component"
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
 	odoutil "github.com/openshift/odo/pkg/odo/util"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	svc "github.com/openshift/odo/pkg/service"
+	"github.com/openshift/odo/pkg/util"
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
@@ -33,6 +36,8 @@ type ServiceListOptions struct {
 	*genericclioptions.Context
 	// Context to use when listing service. This will use app and project values from the context
 	componentContext string
+
+	devfilePath string
 }
 
 // NewServiceListOptions creates a new ServiceListOptions instance
@@ -42,7 +47,9 @@ func NewServiceListOptions() *ServiceListOptions {
 
 // Complete completes ServiceListOptions after they've been created
 func (o *ServiceListOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
-	if experimental.IsExperimentalModeEnabled() {
+	o.devfilePath = filepath.Join(o.componentContext, component.DevfilePath)
+
+	if util.CheckPathExists(o.devfilePath) {
 		o.Context = genericclioptions.NewDevfileContext(cmd)
 	} else {
 		o.Context = genericclioptions.NewContext(cmd)
@@ -52,7 +59,8 @@ func (o *ServiceListOptions) Complete(name string, cmd *cobra.Command, args []st
 
 // Validate validates the ServiceListOptions based on completed values
 func (o *ServiceListOptions) Validate() (err error) {
-	if !experimental.IsExperimentalModeEnabled() {
+
+	if !util.CheckPathExists(o.devfilePath) {
 		// Throw error if project and application values are not available.
 		// This will most likely be the case when user does odo service list from outside a component directory and
 		// doesn't provide --app and/or --project flags
@@ -65,7 +73,8 @@ func (o *ServiceListOptions) Validate() (err error) {
 
 // Run contains the logic for the odo service list command
 func (o *ServiceListOptions) Run() (err error) {
-	if experimental.IsExperimentalModeEnabled() {
+
+	if util.CheckPathExists(o.devfilePath) {
 		// if experimental mode is enabled, we list only operator hub backed
 		// services and not service catalog ones
 		var list []unstructured.Unstructured
@@ -84,11 +93,11 @@ func (o *ServiceListOptions) Run() (err error) {
 		} else {
 			w := tabwriter.NewWriter(os.Stdout, 5, 2, 3, ' ', tabwriter.TabIndent)
 
-			fmt.Fprintln(w, "NAME", "\t", "TYPE", "\t", "AGE")
+			fmt.Fprintln(w, "NAME", "\t", "AGE")
 
 			for _, item := range list {
 				duration := time.Since(item.GetCreationTimestamp().Time).Truncate(time.Second).String()
-				fmt.Fprintln(w, item.GetName(), "\t", item.GetKind(), "\t", duration)
+				fmt.Fprintln(w, strings.Join([]string{item.GetKind(), item.GetName()}, "/"), "\t", duration)
 			}
 
 			w.Flush()

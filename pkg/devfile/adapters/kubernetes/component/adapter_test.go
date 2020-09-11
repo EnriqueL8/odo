@@ -3,6 +3,7 @@ package component
 import (
 	"testing"
 
+	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/util"
 	"github.com/pkg/errors"
 
@@ -15,7 +16,10 @@ import (
 
 	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 )
@@ -23,48 +27,67 @@ import (
 func TestCreateOrUpdateComponent(t *testing.T) {
 
 	testComponentName := "test"
+	deployment := v1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       kclient.DeploymentKind,
+			APIVersion: kclient.DeploymentAPIVersion,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testComponentName,
+		},
+	}
 
 	tests := []struct {
-		name          string
-		componentType versionsCommon.DevfileComponentType
-		running       bool
-		wantErr       bool
+		name            string
+		componentType   versionsCommon.DevfileComponentType
+		envInfo         envinfo.EnvSpecificInfo
+		portExposureMap map[int32]versionsCommon.ExposureType
+		running         bool
+		wantErr         bool
 	}{
 		{
-			name:          "Case: Invalid devfile",
-			componentType: "",
-			running:       false,
-			wantErr:       true,
+			name:            "Case 1: Invalid devfile",
+			componentType:   "",
+			envInfo:         envinfo.EnvSpecificInfo{},
+			portExposureMap: map[int32]versionsCommon.ExposureType{},
+			running:         false,
+			wantErr:         true,
 		},
 		{
-			name:          "Case: Valid devfile",
-			componentType: versionsCommon.ContainerComponentType,
-			running:       false,
-			wantErr:       false,
+			name:            "Case 2: Valid devfile",
+			componentType:   versionsCommon.ContainerComponentType,
+			envInfo:         envinfo.EnvSpecificInfo{},
+			portExposureMap: map[int32]versionsCommon.ExposureType{},
+			running:         false,
+			wantErr:         false,
 		},
 		{
-			name:          "Case: Invalid devfile, already running component",
-			componentType: "",
-			running:       true,
-			wantErr:       true,
+			name:            "Case 3: Invalid devfile, already running component",
+			componentType:   "",
+			envInfo:         envinfo.EnvSpecificInfo{},
+			portExposureMap: map[int32]versionsCommon.ExposureType{},
+			running:         true,
+			wantErr:         true,
 		},
 		{
-			name:          "Case: Valid devfile, already running component",
-			componentType: versionsCommon.ContainerComponentType,
-			running:       true,
-			wantErr:       false,
+			name:            "Case 4: Valid devfile, already running component",
+			componentType:   versionsCommon.ContainerComponentType,
+			envInfo:         envinfo.EnvSpecificInfo{},
+			portExposureMap: map[int32]versionsCommon.ExposureType{},
+			running:         true,
+			wantErr:         false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var comp versionsCommon.DevfileComponent
 			if tt.componentType != "" {
-				comp = testingutil.GetFakeComponent("component")
+				comp = testingutil.GetFakeContainerComponent("component")
 			}
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
-					Components:   []versionsCommon.DevfileComponent{comp},
-					ExecCommands: []versionsCommon.Exec{getExecCommand("run", versionsCommon.RunCommandGroupType)},
+				Data: &testingutil.TestDevfileData{
+					Components: []versionsCommon.DevfileComponent{comp},
+					Commands:   []versionsCommon.DevfileCommand{getExecCommand("run", versionsCommon.RunCommandGroupType)},
 				},
 			}
 
@@ -74,18 +97,19 @@ func TestCreateOrUpdateComponent(t *testing.T) {
 			}
 
 			fkclient, fkclientset := kclient.FakeNew()
-			fkWatch := watch.NewFake()
 
-			// Change the status
-			go func() {
-				fkWatch.Modify(kclient.FakePodStatus(corev1.PodRunning, testComponentName))
-			}()
-			fkclientset.Kubernetes.PrependWatchReactor("pods", func(action ktesting.Action) (handled bool, ret watch.Interface, err error) {
-				return true, fkWatch, nil
-			})
+			if tt.running {
+				fkclientset.Kubernetes.PrependReactor("update", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+					return true, &deployment, nil
+				})
+
+				fkclientset.Kubernetes.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+					return true, &deployment, nil
+				})
+			}
 
 			componentAdapter := New(adapterCtx, *fkclient)
-			err := componentAdapter.createOrUpdateComponent(tt.running)
+			err := componentAdapter.createOrUpdateComponent(tt.running, tt.envInfo, tt.portExposureMap)
 
 			// Checks for unexpected error cases
 			if !tt.wantErr == (err != nil) {
@@ -98,10 +122,11 @@ func TestCreateOrUpdateComponent(t *testing.T) {
 
 func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 	tests := []struct {
-		name       string
-		containers []corev1.Container
-		want       string
-		wantErr    bool
+		name           string
+		containers     []corev1.Container
+		want           string
+		wantSourcePath string
+		wantErr        bool
 	}{
 		{
 			name: "Case: One container, no volumes",
@@ -110,8 +135,9 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 					Name: "test",
 				},
 			},
-			want:    "",
-			wantErr: true,
+			want:           "",
+			wantSourcePath: "",
+			wantErr:        true,
 		},
 		{
 			name: "Case: One container, no source volume",
@@ -125,8 +151,9 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 					},
 				},
 			},
-			want:    "",
-			wantErr: true,
+			want:           "",
+			wantSourcePath: "",
+			wantErr:        true,
 		},
 		{
 			name: "Case: One container, source volume",
@@ -135,13 +162,15 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 					Name: "test",
 					VolumeMounts: []corev1.VolumeMount{
 						{
-							Name: kclient.OdoSourceVolume,
+							Name:      kclient.OdoSourceVolume,
+							MountPath: kclient.OdoSourceVolumeMount,
 						},
 					},
 				},
 			},
-			want:    "test",
-			wantErr: false,
+			want:           "test",
+			wantSourcePath: kclient.OdoSourceVolumeMount,
+			wantErr:        false,
 		},
 		{
 			name: "Case: One container, multiple volumes",
@@ -153,13 +182,15 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 							Name: "test",
 						},
 						{
-							Name: kclient.OdoSourceVolume,
+							Name:      kclient.OdoSourceVolume,
+							MountPath: kclient.OdoSourceVolumeMount,
 						},
 					},
 				},
 			},
-			want:    "test",
-			wantErr: false,
+			want:           "test",
+			wantSourcePath: kclient.OdoSourceVolumeMount,
+			wantErr:        false,
 		},
 		{
 			name: "Case: Multiple containers, no source volumes",
@@ -176,8 +207,9 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 					},
 				},
 			},
-			want:    "",
-			wantErr: true,
+			want:           "",
+			wantSourcePath: "",
+			wantErr:        true,
 		},
 		{
 			name: "Case: Multiple containers, multiple volumes",
@@ -192,21 +224,49 @@ func TestGetFirstContainerWithSourceVolume(t *testing.T) {
 							Name: "test",
 						},
 						{
-							Name: kclient.OdoSourceVolume,
+							Name:      kclient.OdoSourceVolume,
+							MountPath: kclient.OdoSourceVolumeMount,
 						},
 					},
 				},
 			},
-			want:    "container-two",
-			wantErr: false,
+			want:           "container-two",
+			wantSourcePath: kclient.OdoSourceVolumeMount,
+			wantErr:        false,
+		},
+		{
+			name: "Case: Multiple volumes, different source volume path",
+			containers: []corev1.Container{
+				{
+					Name: "test",
+				},
+				{
+					Name: "container-two",
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name: "test",
+						},
+						{
+							Name:      kclient.OdoSourceVolume,
+							MountPath: "/some/path",
+						},
+					},
+				},
+			},
+			want:           "container-two",
+			wantSourcePath: "/some/path",
+			wantErr:        false,
 		},
 	}
 	for _, tt := range tests {
-		container, err := getFirstContainerWithSourceVolume(tt.containers)
+		container, sourcePath, err := getFirstContainerWithSourceVolume(tt.containers)
 		if container != tt.want {
 			t.Errorf("expected %s, actual %s", tt.want, container)
 		}
 
+		if sourcePath != tt.wantSourcePath {
+			t.Errorf("expected %s, actual %s", tt.wantSourcePath, sourcePath)
+		}
 		if !tt.wantErr == (err != nil) {
 			t.Errorf("expected %v, actual %v", tt.wantErr, err)
 		}
@@ -220,27 +280,45 @@ func TestDoesComponentExist(t *testing.T) {
 		componentType    versionsCommon.DevfileComponentType
 		componentName    string
 		getComponentName string
+		envInfo          envinfo.EnvSpecificInfo
+		portExposureMap  map[int32]versionsCommon.ExposureType
 		want             bool
+		wantErr          bool
 	}{
 		{
 			name:             "Case 1: Valid component name",
 			componentName:    "test-name",
 			getComponentName: "test-name",
+			envInfo:          envinfo.EnvSpecificInfo{},
+			portExposureMap:  map[int32]versionsCommon.ExposureType{},
 			want:             true,
+			wantErr:          false,
 		},
 		{
 			name:             "Case 2: Non-existent component name",
 			componentName:    "test-name",
 			getComponentName: "fake-component",
+			envInfo:          envinfo.EnvSpecificInfo{},
+			portExposureMap:  map[int32]versionsCommon.ExposureType{},
 			want:             false,
+			wantErr:          false,
+		},
+		{
+			name:             "Case 3: Error condition",
+			componentName:    "test-name",
+			getComponentName: "test-name",
+			envInfo:          envinfo.EnvSpecificInfo{},
+			portExposureMap:  map[int32]versionsCommon.ExposureType{},
+			want:             false,
+			wantErr:          true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
-					Components:   []versionsCommon.DevfileComponent{testingutil.GetFakeComponent("component")},
-					ExecCommands: []versionsCommon.Exec{getExecCommand("run", versionsCommon.RunCommandGroupType)},
+				Data: &testingutil.TestDevfileData{
+					Components: []versionsCommon.DevfileComponent{testingutil.GetFakeContainerComponent("component")},
+					Commands:   []versionsCommon.DevfileCommand{getExecCommand("run", versionsCommon.RunCommandGroupType)},
 				},
 			}
 
@@ -258,16 +336,31 @@ func TestDoesComponentExist(t *testing.T) {
 
 			// DoesComponentExist requires an already started component, so start it.
 			componentAdapter := New(adapterCtx, *fkclient)
-			err := componentAdapter.createOrUpdateComponent(false)
+			err := componentAdapter.createOrUpdateComponent(false, tt.envInfo, tt.portExposureMap)
 
 			// Checks for unexpected error cases
 			if err != nil {
 				t.Errorf("component adapter start unexpected error %v", err)
 			}
 
+			fkclientset.Kubernetes.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
+				emptyDeployment := testingutil.CreateFakeDeployment("")
+				deployment := testingutil.CreateFakeDeployment(tt.getComponentName)
+
+				if tt.wantErr {
+					return true, emptyDeployment, errors.Errorf("deployment get error")
+				} else if tt.getComponentName == tt.componentName {
+					return true, deployment, nil
+				}
+
+				return true, emptyDeployment, kerrors.NewNotFound(schema.GroupResource{}, "")
+			})
+
 			// Verify that a component with the specified name exists
-			componentExists := componentAdapter.DoesComponentExist(tt.getComponentName)
-			if componentExists != tt.want {
+			componentExists, err := componentAdapter.DoesComponentExist(tt.getComponentName)
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			} else if !tt.wantErr && componentExists != tt.want {
 				t.Errorf("expected %v, actual %v", tt.want, componentExists)
 			}
 
@@ -305,8 +398,8 @@ func TestWaitAndGetComponentPod(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
-					Components: []versionsCommon.DevfileComponent{testingutil.GetFakeComponent("component")},
+				Data: &testingutil.TestDevfileData{
+					Components: []versionsCommon.DevfileComponent{testingutil.GetFakeContainerComponent("component")},
 				},
 			}
 
@@ -328,7 +421,7 @@ func TestWaitAndGetComponentPod(t *testing.T) {
 			})
 
 			componentAdapter := New(adapterCtx, *fkclient)
-			_, err := componentAdapter.waitAndGetComponentPod(false)
+			_, err := componentAdapter.getPod(false)
 
 			// Checks for unexpected error cases
 			if !tt.wantErr == (err != nil) {
@@ -343,47 +436,92 @@ func TestAdapterDelete(t *testing.T) {
 	type args struct {
 		labels map[string]string
 	}
+
+	emptyPods := &corev1.PodList{
+		Items: []corev1.Pod{},
+	}
+
 	tests := []struct {
-		name               string
-		args               args
-		existingDeployment *v1.Deployment
-		componentName      string
-		componentExists    bool
-		wantErr            bool
+		name            string
+		args            args
+		existingPod     *corev1.PodList
+		componentName   string
+		componentExists bool
+		wantErr         bool
 	}{
 		{
 			name: "case 1: component exists and given labels are valid",
 			args: args{labels: map[string]string{
 				"component": "component",
 			}},
-			existingDeployment: testingutil.CreateFakeDeployment("fronted"),
-			componentName:      "component",
-			componentExists:    true,
-			wantErr:            false,
+			existingPod: &corev1.PodList{
+				Items: []corev1.Pod{
+					*testingutil.CreateFakePod("component", "component"),
+				},
+			},
+			componentName:   "component",
+			componentExists: true,
+			wantErr:         false,
 		},
 		{
-			name:               "case 2: component exists and given labels are not valid",
-			args:               args{labels: nil},
-			existingDeployment: testingutil.CreateFakeDeployment("fronted"),
-			componentName:      "component",
-			componentExists:    true,
-			wantErr:            true,
+			name: "case 2: component exists and given labels are not valid",
+			args: args{labels: nil},
+			existingPod: &corev1.PodList{
+				Items: []corev1.Pod{
+					*testingutil.CreateFakePod("component", "component"),
+				},
+			},
+			componentName:   "component",
+			componentExists: true,
+			wantErr:         true,
 		},
 		{
 			name: "case 3: component doesn't exists",
 			args: args{labels: map[string]string{
 				"component": "component",
 			}},
-			existingDeployment: testingutil.CreateFakeDeployment("fronted"),
-			componentName:      "component",
-			componentExists:    false,
-			wantErr:            true,
+			existingPod: &corev1.PodList{
+				Items: []corev1.Pod{
+					*testingutil.CreateFakePod("component", "component"),
+				},
+			},
+			componentName:   "nocomponent",
+			componentExists: false,
+			wantErr:         false,
+		},
+		{
+			name: "case 4: resource forbidden",
+			args: args{labels: map[string]string{
+				"component": "component",
+			}},
+			existingPod: &corev1.PodList{
+				Items: []corev1.Pod{
+					*testingutil.CreateFakePod("component", "component"),
+				},
+			},
+			componentName:   "resourceforbidden",
+			componentExists: false,
+			wantErr:         false,
+		},
+		{
+			name: "case 5: component check error",
+			args: args{labels: map[string]string{
+				"component": "component",
+			}},
+			existingPod: &corev1.PodList{
+				Items: []corev1.Pod{
+					*testingutil.CreateFakePod("component", "component"),
+				},
+			},
+			componentName:   "componenterror",
+			componentExists: true,
+			wantErr:         true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := devfileParser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					// ComponentType: "nodejs",
 				},
 			}
@@ -399,10 +537,7 @@ func TestAdapterDelete(t *testing.T) {
 
 			fkclient, fkclientset := kclient.FakeNew()
 
-			a := Adapter{
-				Client:         *fkclient,
-				AdapterContext: adapterCtx,
-			}
+			a := New(adapterCtx, *fkclient)
 
 			fkclientset.Kubernetes.PrependReactor("delete-collection", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
 				if util.ConvertLabelsToSelector(tt.args.labels) != action.(ktesting.DeleteCollectionAction).GetListRestrictions().Labels.String() {
@@ -411,32 +546,38 @@ func TestAdapterDelete(t *testing.T) {
 				return true, nil, nil
 			})
 
-			fkclientset.Kubernetes.PrependReactor("get", "deployments", func(action ktesting.Action) (bool, runtime.Object, error) {
-				if action.(ktesting.GetAction).GetName() != tt.componentName {
-					return true, nil, errors.Errorf("get action called with different component name, want: %s, got: %s", action.(ktesting.GetAction).GetName(), tt.componentName)
+			fkclientset.Kubernetes.PrependReactor("list", "pods", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+				if tt.componentName == "nocomponent" {
+					return true, emptyPods, &kclient.PodNotFoundError{Selector: "somegarbage"}
+				} else if tt.componentName == "resourceforbidden" {
+					return true, emptyPods, kerrors.NewForbidden(schema.GroupResource{}, "", nil)
+				} else if tt.componentName == "componenterror" {
+					return true, emptyPods, errors.Errorf("pod check error")
 				}
-				return true, tt.existingDeployment, nil
+				return true, tt.existingPod, nil
 			})
 
-			if err := a.Delete(tt.args.labels); (err != nil) != tt.wantErr {
+			if err := a.Delete(tt.args.labels, false); (err != nil) != tt.wantErr {
 				t.Errorf("Delete() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func getExecCommand(id string, group common.DevfileCommandGroupType) versionsCommon.Exec {
+func getExecCommand(id string, group common.DevfileCommandGroupType) versionsCommon.DevfileCommand {
 
 	commands := [...]string{"ls -la", "pwd"}
 	component := "component"
 	workDir := [...]string{"/", "/root"}
 
-	return versionsCommon.Exec{
-		Id:          id,
-		CommandLine: commands[0],
-		Component:   component,
-		WorkingDir:  workDir[0],
-		Group:       &common.Group{Kind: group},
+	return versionsCommon.DevfileCommand{
+		Id: id,
+		Exec: &common.Exec{
+			CommandLine: commands[0],
+			Component:   component,
+			WorkingDir:  workDir[0],
+			Group:       &common.Group{Kind: group},
+		},
 	}
 
 }

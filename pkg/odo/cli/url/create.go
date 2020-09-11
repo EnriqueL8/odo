@@ -3,10 +3,16 @@ package url
 import (
 	"fmt"
 	"strconv"
+	"strings"
+
+	"github.com/openshift/odo/pkg/odo/util/validation"
 
 	"github.com/openshift/odo/pkg/config"
+	"github.com/openshift/odo/pkg/devfile"
+	adaptersCommon "github.com/openshift/odo/pkg/devfile/adapters/common"
 	adapterutils "github.com/openshift/odo/pkg/devfile/adapters/kubernetes/utils"
 	"github.com/openshift/odo/pkg/devfile/parser"
+	"github.com/openshift/odo/pkg/devfile/parser/data/common"
 	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/log"
 	clicomponent "github.com/openshift/odo/pkg/odo/cli/component"
@@ -41,20 +47,21 @@ var (
 	%[1]s example --port 8080
 	  `)
 
-	urlCreateExampleExperimental = ktemplates.Examples(`  # Create a URL with a specific host by automatically detecting the port used by the component (using CRC as an exampple)
-	%[1]s example  --host apps-crc.testing
-  
-	# Create a URL with a specific name and host (using CRC as an example)
-	%[1]s example --host apps-crc.testing
+	urlCreateExampleExperimental = ktemplates.Examples(`
+	# Create a URL with a specific name and port
+	%[1]s myurl --port 8080
 
-	# Create a URL for the current component with a specific port and host (using CRC as an example)
-	%[1]s --port 8080 --host apps-crc.testing
+	# Create a URL of ingress kind for the current component with a host
+	%[1]s --port 8080 --host example.com --ingress
 
-	# Create a URL of ingress kind for the current component with a host (using CRC as an example)
-	%[1]s --host apps-crc.testing --ingress
+	# Create a secure URL for the current component
+	%[1]s --port 8080 --secure
 
-	# Create a secure URL for the current component with a specific host (using CRC as an example)
-	%[1]s --host apps-crc.testing --secure
+	# Create a URL with a specific path and protocol type
+	%[1]s --port 8080 --path /hello --protocol http
+
+	# Create a URL under a specific container
+	%[1]s --port 8080 --container runtime
 	  `)
 
 	urlCreateExampleDocker = ktemplates.Examples(`  # Create a URL with a specific name by automatically detecting the port used by the component
@@ -79,10 +86,16 @@ type URLCreateOptions struct {
 	host             string
 	tlsSecret        string
 	exposedPort      int
+	path             string
+	protocol         string
+	container        string
 	forceFlag        bool
 	isRouteSupported bool
 	wantIngress      bool
 	urlType          envinfo.URLKind
+	isDevfile        bool
+	isDocker         bool
+	devObj           parser.DevfileObj
 }
 
 // NewURLCreateOptions creates a new URLCreateOptions instance
@@ -91,10 +104,11 @@ func NewURLCreateOptions() *URLCreateOptions {
 }
 
 // Complete completes URLCreateOptions after they've been Created
-func (o *URLCreateOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
-	o.DevfilePath = clicomponent.DevfilePath
+func (o *URLCreateOptions) Complete(_ string, cmd *cobra.Command, args []string) (err error) {
+	o.CompleteDevfilePath()
+	o.isDevfile = util.CheckPathExists(o.DevfilePath)
 
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
+	if o.isDevfile {
 		o.Context = genericclioptions.NewDevfileContext(cmd)
 	} else if o.now {
 		o.Context = genericclioptions.NewContextCreatingAppIfNeeded(cmd)
@@ -102,8 +116,8 @@ func (o *URLCreateOptions) Complete(name string, cmd *cobra.Command, args []stri
 		o.Context = genericclioptions.NewContext(cmd)
 	}
 
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
-		if !pushtarget.IsPushTargetDocker() {
+	if o.isDevfile {
+		if !o.isDocker {
 			o.Client = genericclioptions.Client(cmd)
 
 			o.isRouteSupported, err = o.Client.IsRouteSupported()
@@ -116,10 +130,16 @@ func (o *URLCreateOptions) Complete(name string, cmd *cobra.Command, args []stri
 			} else {
 				o.urlType = envinfo.ROUTE
 			}
-
-			if o.tlsSecret != "" && (!o.wantIngress || !o.secureURL) {
-				return fmt.Errorf("tls secret is only available for secure URLs of ingress kind")
+			if len(o.path) > 0 && (strings.HasPrefix(o.path, "/") || strings.HasPrefix(o.path, "\\")) {
+				if len(o.path) <= 1 {
+					o.path = ""
+				} else {
+					// remove the leading / or \ from provided path
+					o.path = string([]rune(o.path)[1:])
+				}
 			}
+			// add leading / to path, if the path provided is empty, it will be set to / which is the default valud of path
+			o.path = "/" + o.path
 		}
 
 		err = o.InitEnvInfoFromContext()
@@ -128,51 +148,92 @@ func (o *URLCreateOptions) Complete(name string, cmd *cobra.Command, args []stri
 		}
 
 		// Parse devfile and validate
-		devObj, err := parser.ParseAndValidate(o.DevfilePath)
+		devObj, err := devfile.ParseAndValidate(o.DevfilePath)
 		if err != nil {
-			return fmt.Errorf("fail to parse the devfile %s, with error: %s", o.DevfilePath, err)
+			return fmt.Errorf("failed to parse the devfile %s, with error: %s", o.DevfilePath, err)
 		}
-		containers, err := adapterutils.GetContainers(devObj)
-		if err != nil {
-			return err
-		}
-		if len(containers) == 0 {
-			return fmt.Errorf("No valid components found in the devfile")
-		}
-		compWithEndpoint := 0
-		var postList []string
-		for _, c := range containers {
-			if len(c.Ports) != 0 {
-				compWithEndpoint++
-				for _, port := range c.Ports {
-					postList = append(postList, strconv.FormatInt(int64(port.ContainerPort), 10))
+		o.devObj = devObj
+		componentName := o.EnvSpecificInfo.GetName()
+
+		if o.isDocker {
+			var portList []string
+			containers, err := adapterutils.GetContainers(devObj)
+			if err != nil {
+				return err
+			}
+			if len(containers) == 0 {
+				return fmt.Errorf("no valid components found in the devfile")
+			}
+			compWithEndpoint := 0
+			for _, c := range containers {
+				if len(c.Ports) != 0 {
+					compWithEndpoint++
+					for _, port := range c.Ports {
+						portList = append(portList, strconv.FormatInt(int64(port.ContainerPort), 10))
+					}
+				}
+				if compWithEndpoint > 1 {
+					return fmt.Errorf("devfile should only have one component containing endpoint")
 				}
 			}
-			if compWithEndpoint > 1 {
-				return fmt.Errorf("Devfile should only have one component containing endpoint")
+			if compWithEndpoint == 0 {
+				return fmt.Errorf("no valid component with an endpoint found in the devfile")
 			}
-		}
-		if compWithEndpoint == 0 {
-			return fmt.Errorf("No valid component with an endpoint found in the devfile")
-		}
-		componentName := o.EnvSpecificInfo.GetName()
-		o.componentPort, err = url.GetValidPortNumber(componentName, o.urlPort, postList)
-		if err != nil {
-			return err
-		}
-
-		if pushtarget.IsPushTargetDocker() {
+			o.componentPort, err = url.GetValidPortNumber(componentName, o.urlPort, portList)
+			if err != nil {
+				return err
+			}
 			o.exposedPort, err = url.GetValidExposedPortNumber(o.exposedPort)
 			if err != nil {
 				return err
 			}
 			o.urlType = envinfo.DOCKER
-		}
-
-		if len(args) != 0 {
-			o.urlName = args[0]
 		} else {
-			o.urlName = url.GetURLName(componentName, o.componentPort)
+			if o.urlPort == -1 {
+				return fmt.Errorf("port must be provided to create an endpoint entry in devfile")
+			}
+			o.componentPort = o.urlPort
+			if len(args) != 0 {
+				o.urlName = args[0]
+			} else {
+				o.urlName = url.GetURLName(componentName, o.componentPort)
+			}
+
+			foundContainer := false
+			containerComponents := adaptersCommon.GetDevfileContainerComponents(devObj.Data)
+			if len(containerComponents) == 0 {
+				return fmt.Errorf("no valid components found in the devfile")
+			}
+			// map TargetPort with containerName
+			containerPortMap := make(map[int]string)
+			for _, component := range containerComponents {
+				if len(o.container) > 0 && !foundContainer {
+					if component.Name == o.container {
+						foundContainer = true
+					}
+				}
+				for _, endpoint := range component.Container.Endpoints {
+					if endpoint.Name == o.urlName {
+						return fmt.Errorf("url %v already exist in devfile endpoint entry under container %v", o.urlName, component.Name)
+					}
+					containerPortMap[int(endpoint.TargetPort)] = component.Name
+				}
+			}
+			if len(o.container) > 0 && !foundContainer {
+				return fmt.Errorf("the container specified: %v does not exist in devfile", o.container)
+			}
+			if containerName, exist := containerPortMap[o.componentPort]; exist {
+				if len(o.container) > 0 && o.container != containerName {
+					return fmt.Errorf("cannot set URL %v under container %v, TargetPort %v is being used under container %v", o.urlName, o.container, o.componentPort, containerName)
+				}
+				o.container = containerName
+			}
+			// container is not provided, or the specified port is not being used under any containers
+			// pick the first container to store the new enpoint
+			if len(o.container) == 0 {
+				o.container = containerComponents[0].Name
+			}
+
 		}
 
 	} else {
@@ -204,50 +265,70 @@ func (o *URLCreateOptions) Complete(name string, cmd *cobra.Command, args []stri
 
 // Validate validates the URLCreateOptions based on completed values
 func (o *URLCreateOptions) Validate() (err error) {
-	// Check if exist
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
-		// if experimental mode is enabled, and devfile is provided.
-		// check if valid host is provided
-		if !pushtarget.IsPushTargetDocker() && len(o.host) <= 0 && (!o.isRouteSupported || o.wantIngress) {
-			return fmt.Errorf("host must be provided in order to create ingress")
+	if !util.CheckOutputFlag(o.OutputFlag) {
+		return fmt.Errorf("given output format %s is not supported", o.OutputFlag)
+	}
+
+	// if experimental mode is enabled, and devfile is provided.
+	errorList := make([]string, 0)
+	if o.isDevfile {
+		if !o.isDocker && o.tlsSecret != "" && (o.urlType != envinfo.INGRESS || !o.secureURL) {
+			errorList = append(errorList, "TLS secret is only available for secure URLs of Ingress kind")
+		}
+		// check if a host is provided for route based URLs
+		if len(o.host) > 0 {
+			if o.urlType == envinfo.ROUTE {
+				errorList = append(errorList, "host is not supported for URLs of Route Kind")
+			}
+			if err := validation.ValidateHost(o.host); err != nil {
+				errorList = append(errorList, err.Error())
+			}
+		} else if o.urlType == envinfo.INGRESS {
+			errorList = append(errorList, "host must be provided in order to create URLS of Ingress Kind")
+		}
+		if len(o.protocol) > 0 && (strings.ToLower(o.protocol) != string(common.HTTP) && strings.ToLower(o.protocol) != string(common.HTTPS) && strings.ToLower(o.protocol) != string(common.WS) &&
+			strings.ToLower(o.protocol) != string(common.WSS) && strings.ToLower(o.protocol) != string(common.TCP) && strings.ToLower(o.protocol) != string(common.UDP)) {
+			errorList = append(errorList, fmt.Sprintf("endpoint protocol only supports %v|%v|%v|%v|%v|%v", common.HTTP, common.HTTPS, common.WSS, common.WS, common.TCP, common.UDP))
 		}
 		for _, localURL := range o.EnvSpecificInfo.GetURL() {
 			if o.urlName == localURL.Name {
-				return fmt.Errorf("the url %s already exists", o.urlName)
+				errorList = append(errorList, fmt.Sprintf("URL %s already exists", o.urlName))
 			}
 		}
 	} else {
 		for _, localURL := range o.LocalConfigInfo.GetURL() {
 			if o.urlName == localURL.Name {
-				return fmt.Errorf("the url %s already exists in the application: %s", o.urlName, o.Application)
+				errorList = append(errorList, fmt.Sprintf("URL %s already exists in application: %s", o.urlName, o.Application))
 			}
 		}
 	}
 	// Check if url name is more than 63 characters long
 	if len(o.urlName) > 63 {
-		return fmt.Errorf("url name must be shorter than 63 characters")
+		errorList = append(errorList, "URL name must be shorter than 63 characters")
 	}
 
-	if !util.CheckOutputFlag(o.OutputFlag) {
-		return fmt.Errorf("given output format %s is not supported", o.OutputFlag)
-	}
-	if !experimental.IsExperimentalModeEnabled() {
+	if !o.isDevfile {
 		if o.now {
-			err = o.ValidateComponentCreate()
-			if err != nil {
-				return err
+			if err = o.ValidateComponentCreate(); err != nil {
+				errorList = append(errorList, err.Error())
 			}
 		}
+	}
+
+	if len(errorList) > 0 {
+		for i := range errorList {
+			errorList[i] = fmt.Sprintf("\t- %s", errorList[i])
+		}
+		return fmt.Errorf("URL creation failed:\n%s", strings.Join(errorList, "\n"))
 	}
 	return
 }
 
 // Run contains the logic for the odo url create command
 func (o *URLCreateOptions) Run() (err error) {
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
-		if pushtarget.IsPushTargetDocker() {
+	if o.isDevfile {
+		if o.isDocker {
 			for _, localURL := range o.EnvSpecificInfo.GetURL() {
-				fmt.Printf("componentPort is %v, localUrl.port is %v", o.componentPort, localURL.Port)
 				if o.componentPort == localURL.Port && localURL.ExposedPort > 0 {
 					if !o.forceFlag {
 						if !ui.Proceed(fmt.Sprintf("Port %v already has an exposed port %v set for it. Do you want to override the exposed port", localURL.Port, localURL.ExposedPort)) {
@@ -263,17 +344,35 @@ func (o *URLCreateOptions) Run() (err error) {
 					break
 				}
 			}
+			err = o.EnvSpecificInfo.SetConfiguration("url", envinfo.EnvInfoURL{Name: o.urlName, Port: o.componentPort, ExposedPort: o.exposedPort, Kind: o.urlType})
+		} else {
+			newEndpointEntry := common.Endpoint{
+				Name:       o.urlName,
+				Path:       o.path,
+				Secure:     o.secureURL,
+				Exposure:   common.Public,
+				TargetPort: int32(o.componentPort),
+				Protocol:   common.ProtocolType(strings.ToLower(o.protocol)),
+			}
+
+			err = url.AddEndpointInDevfile(o.devObj, newEndpointEntry, o.container)
+			if err != nil {
+				return errors.Wrapf(err, "failed to write endpoints information into devfile")
+			}
+			err = o.EnvSpecificInfo.SetConfiguration("url", envinfo.EnvInfoURL{Name: o.urlName, Host: o.host, TLSSecret: o.tlsSecret, Kind: o.urlType})
+			if err != nil {
+				return errors.Wrapf(err, "failed to persist the component settings to env file")
+			}
 		}
-		err = o.EnvSpecificInfo.SetConfiguration("url", envinfo.EnvInfoURL{Name: o.urlName, Port: o.componentPort, Host: o.host, Secure: o.secureURL, TLSSecret: o.tlsSecret, ExposedPort: o.exposedPort, Kind: o.urlType})
 	} else {
 		err = o.LocalConfigInfo.SetConfiguration("url", config.ConfigURL{Name: o.urlName, Port: o.componentPort, Secure: o.secureURL})
 	}
 	if err != nil {
 		return errors.Wrapf(err, "failed to persist the component settings to config file")
 	}
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
+	if o.isDevfile {
 		componentName := o.EnvSpecificInfo.GetName()
-		if pushtarget.IsPushTargetDocker() {
+		if o.isDocker {
 			log.Successf("URL %s created for component: %v with exposed port: %v", o.urlName, componentName, o.exposedPort)
 		} else {
 			log.Successf("URL %s created for component: %v", o.urlName, componentName)
@@ -282,7 +381,7 @@ func (o *URLCreateOptions) Run() (err error) {
 		log.Successf("URL %s created for component: %v", o.urlName, o.Component())
 	}
 	if o.now {
-		if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(o.DevfilePath) {
+		if o.isDevfile {
 			err = o.DevfilePush()
 		} else {
 			err = o.Push()
@@ -310,24 +409,27 @@ func NewCmdURLCreate(name, fullName string) *cobra.Command {
 			genericclioptions.GenericRun(o, cmd, args)
 		},
 	}
-	urlCreateCmd.Flags().IntVarP(&o.urlPort, "port", "", -1, "port number for the url of the component, required in case of components which expose more than one service port")
-	// if experimental mode is enabled, add more flags to support ingress creation or docker application based on devfile
+	urlCreateCmd.Flags().IntVarP(&o.urlPort, "port", "", -1, "Port number for the url of the component, required in case of components which expose more than one service port")
+
+	// If experimental mode is enabled, check to see if we are using Docker as a push target and create the respective parameters
 	if experimental.IsExperimentalModeEnabled() {
-		if pushtarget.IsPushTargetDocker() {
-			urlCreateCmd.Flags().IntVarP(&o.exposedPort, "exposed-port", "", -1, "an external port to the application container")
+		o.isDocker = pushtarget.IsPushTargetDocker()
+		if o.isDocker {
+			urlCreateCmd.Flags().IntVarP(&o.exposedPort, "exposed-port", "", -1, "External port to the application container")
 			urlCreateCmd.Flags().BoolVarP(&o.forceFlag, "force", "f", false, "Don't ask for confirmation, assign an exposed port directly")
 			urlCreateCmd.Example = fmt.Sprintf(urlCreateExampleDocker, fullName)
-		} else {
-			urlCreateCmd.Flags().StringVar(&o.tlsSecret, "tls-secret", "", "tls secret name for the url of the component if the user bring his own tls secret")
-			urlCreateCmd.Flags().StringVarP(&o.host, "host", "", "", "Cluster ip for this URL")
-			urlCreateCmd.Flags().BoolVarP(&o.secureURL, "secure", "", false, "creates a secure https url")
-			urlCreateCmd.Flags().BoolVar(&o.wantIngress, "ingress", false, "Creates an ingress instead of Route on OpenShift clusters")
-			urlCreateCmd.Example = fmt.Sprintf(urlCreateExampleExperimental, fullName)
 		}
-	} else {
-		urlCreateCmd.Flags().BoolVarP(&o.secureURL, "secure", "", false, "creates a secure https url")
-		urlCreateCmd.Example = fmt.Sprintf(urlCreateExample, fullName)
 	}
+
+	urlCreateCmd.Flags().StringVar(&o.tlsSecret, "tls-secret", "", "TLS secret name for the url of the component if the user bring their own TLS secret")
+	urlCreateCmd.Flags().StringVarP(&o.host, "host", "", "", "Cluster IP for this URL")
+	urlCreateCmd.Flags().BoolVar(&o.wantIngress, "ingress", false, "Create an Ingress instead of Route on OpenShift clusters")
+	urlCreateCmd.Flags().BoolVarP(&o.secureURL, "secure", "", false, "Create a secure HTTPS URL")
+	urlCreateCmd.Flags().StringVarP(&o.path, "path", "", "", "path for this URL")
+	urlCreateCmd.Flags().StringVarP(&o.protocol, "protocol", "", string(common.HTTP), "protocol for this URL")
+	urlCreateCmd.Flags().StringVarP(&o.container, "container", "", "", "container of the endpoint in devfile")
+	urlCreateCmd.Example = fmt.Sprintf(urlCreateExampleExperimental, fullName)
+
 	genericclioptions.AddNowFlag(urlCreateCmd, &o.now)
 	o.AddContextFlag(urlCreateCmd)
 	completion.RegisterCommandFlagHandler(urlCreateCmd, "context", completion.FileCompletionHandler)

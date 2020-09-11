@@ -4,34 +4,33 @@ import (
 	"testing"
 
 	devfileCtx "github.com/openshift/odo/pkg/devfile/parser/context"
-	v100 "github.com/openshift/odo/pkg/devfile/parser/data/1.0.0"
+	v200 "github.com/openshift/odo/pkg/devfile/parser/data/2.0.0"
+	"github.com/openshift/odo/pkg/devfile/parser/data/common"
 	"github.com/openshift/odo/pkg/testingutil/filesystem"
 )
 
 func TestWriteJsonDevfile(t *testing.T) {
 
 	var (
-		devfileTempPath = "devfile.yaml"
-		apiVersion      = "1.0.0"
-		testName        = "TestName"
+		schemaVersion = "2.0.0"
+		testName      = "TestName"
 	)
 
 	t.Run("write json devfile", func(t *testing.T) {
 
+		// Use fakeFs
+		fs := filesystem.NewFakeFs()
+
 		// DevfileObj
 		devfileObj := DevfileObj{
-			Ctx: devfileCtx.NewDevfileCtx(devfileTempPath),
-			Data: &v100.Devfile100{
-				ApiVersion: v100.ApiVersion(apiVersion),
-				Metadata: v100.Metadata{
+			Ctx: devfileCtx.FakeContext(fs, OutputDevfileJsonPath),
+			Data: &v200.Devfile200{
+				SchemaVersion: schemaVersion,
+				Metadata: common.DevfileMetadata{
 					Name: testName,
 				},
 			},
 		}
-
-		// Use fakeFs
-		fs := filesystem.NewFakeFs()
-		devfileObj.Ctx.Fs = fs
 
 		// test func()
 		err := devfileObj.WriteJsonDevfile()
@@ -46,20 +45,19 @@ func TestWriteJsonDevfile(t *testing.T) {
 
 	t.Run("write yaml devfile", func(t *testing.T) {
 
+		// Use fakeFs
+		fs := filesystem.NewFakeFs()
+
 		// DevfileObj
 		devfileObj := DevfileObj{
-			Ctx: devfileCtx.NewDevfileCtx(devfileTempPath),
-			Data: &v100.Devfile100{
-				ApiVersion: v100.ApiVersion(apiVersion),
-				Metadata: v100.Metadata{
+			Ctx: devfileCtx.FakeContext(fs, OutputDevfileYamlPath),
+			Data: &v200.Devfile200{
+				SchemaVersion: schemaVersion,
+				Metadata: common.DevfileMetadata{
 					Name: testName,
 				},
 			},
 		}
-
-		// Use fakeFs
-		fs := filesystem.NewFakeFs()
-		devfileObj.Ctx.Fs = fs
 
 		// test func()
 		err := devfileObj.WriteYamlDevfile()

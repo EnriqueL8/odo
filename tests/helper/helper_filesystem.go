@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -21,11 +22,58 @@ func CreateNewContext() string {
 	return directory
 }
 
-// DeleteDir delete directory
+// DeleteDir deletes the specified path; due to Windows behaviour (for example https://github.com/openshift/odo/issues/3371)
+// where Windows temporarily holds a lock on files and folders, we keep trying to delete until the operation passes (or it expires)
 func DeleteDir(dir string) {
-	fmt.Fprintf(GinkgoWriter, "Deleting dir: %s\n", dir)
-	err := os.RemoveAll(dir)
+	attempts := 0
+
+	errorReportedAtLeastOnce := false
+
+	err := RunWithExponentialBackoff(func() error {
+		attempts++
+
+		fmt.Fprintf(GinkgoWriter, "Deleting dir: %s\n", dir)
+		err := os.RemoveAll(dir)
+		if err == nil {
+			return nil
+		}
+
+		errorReportedAtLeastOnce = true
+		fmt.Fprintf(GinkgoWriter, "Unable to delete %s on attempt #%d, trying again...\n", dir, attempts)
+
+		return err
+	}, 16, time.Duration(2)*time.Minute)
 	Expect(err).NotTo(HaveOccurred())
+
+	if errorReportedAtLeastOnce {
+		fmt.Fprintf(GinkgoWriter, "Successfully deleted %s after #%d attempts\n", dir, attempts)
+	}
+}
+
+// RunWithExponentialBackoff keeps trying to run 'fxn' until it no longer returns an error; if the function never succeeded,
+// then the most recent error is returned.
+func RunWithExponentialBackoff(fxn func() error, maxDelayInSeconds int, expireDuration time.Duration) error {
+	expireTime := time.Now().Add(expireDuration)
+	delayInSeconds := 1
+
+	err := error(nil)
+
+	for {
+
+		err := fxn()
+
+		if err == nil || time.Now().After(expireTime) {
+			break
+		}
+
+		delayInSeconds *= 2 // exponential backoff
+		if delayInSeconds > maxDelayInSeconds {
+			delayInSeconds = maxDelayInSeconds
+		}
+		time.Sleep(time.Duration(delayInSeconds) * time.Second)
+
+	}
+	return err
 
 }
 
@@ -224,4 +272,27 @@ func ReplaceDevfileField(devfileLocation, field, newValue string) error {
 		return err
 	}
 	return nil
+}
+
+// FileIsEmpty checks if the file is empty
+func FileIsEmpty(filename string) (bool, error) {
+	file, err := os.Stat(filename)
+	if err != nil {
+		return false, err
+	}
+
+	if file.Size() > 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// ReadFile reads the file from the filePath
+func ReadFile(filePath string) (string, error) {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }

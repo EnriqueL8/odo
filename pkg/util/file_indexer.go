@@ -39,9 +39,9 @@ type FileData struct {
 	LastModifiedDate time.Time
 }
 
-// read tries to read the odo index file from the given location and returns the data from the file
+// ReadFileIndex tries to read the odo index file from the given location and returns the data from the file
 // if no such file is present, it means the folder hasn't been walked and thus returns a empty list
-func readFileIndex(filePath string) (*FileIndex, error) {
+func ReadFileIndex(filePath string) (*FileIndex, error) {
 	// Read operation
 	var fi FileIndex
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -65,8 +65,8 @@ func readFileIndex(filePath string) (*FileIndex, error) {
 	return &fi, nil
 }
 
-// resolveIndexFilePath resolves the filepath of the odo index file in the .odo folder
-func resolveIndexFilePath(directory string) (string, error) {
+// ResolveIndexFilePath resolves the filepath of the odo index file in the .odo folder
+func ResolveIndexFilePath(directory string) (string, error) {
 	directoryFi, err := os.Stat(filepath.Join(directory))
 	if err != nil {
 		return "", err
@@ -122,7 +122,7 @@ func checkGitIgnoreFile(directory string, fs filesystem.Filesystem) (string, err
 
 // DeleteIndexFile deletes the index file. It doesn't throw error if it doesn't exist
 func DeleteIndexFile(directory string) error {
-	indexFile, err := resolveIndexFilePath(directory)
+	indexFile, err := ResolveIndexFilePath(directory)
 	if os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
@@ -131,38 +131,136 @@ func DeleteIndexFile(directory string) error {
 	return DeletePath(indexFile)
 }
 
+// IndexerRet is a struct that represent return value of RunIndexer function
+type IndexerRet struct {
+	FilesChanged []string
+	FilesDeleted []string
+	NewFileMap   map[string]FileData
+	ResolvedPath string
+}
+
 // RunIndexer walks the given directory and finds the files which have changed and which were deleted/renamed
 // it reads the odo index file from the .odo folder
 // if no such file is present, it means it's the first time the folder is being walked and thus returns a empty list
 // after the walk, it stores the list of walked files with some information in a odo index file in the .odo folder
-// The filemap stores the values as "relative filepath" => FileData but it the filesChanged and filesDeleted are absolute paths
+// The filemap stores the values as "relative filepath" => FileData but it the FilesChanged and filesDeleted are absolute paths
 // to the files
-func RunIndexer(directory string, ignoreRules []string) (filesChanged []string, filesDeleted []string, err error) {
+func RunIndexer(directory string, ignoreRules []string) (ret IndexerRet, err error) {
 	directory = filepath.FromSlash(directory)
-	resolvedPath, err := resolveIndexFilePath(directory)
+	ret.ResolvedPath, err = ResolveIndexFilePath(directory)
+
 	if err != nil {
-		return filesChanged, filesDeleted, err
+		return ret, err
 	}
 
 	// check for .gitignore file and add odo-file-index.json to .gitignore
 	gitIgnoreFile, err := CheckGitIgnoreFile(directory)
 	if err != nil {
-		return filesChanged, filesDeleted, err
+		return ret, err
 	}
 
 	// add odo-file-index.json path to .gitignore
 	err = AddOdoFileIndex(gitIgnoreFile)
 	if err != nil {
-		return filesChanged, filesDeleted, err
+		return ret, err
 	}
 
 	// read the odo index file
-	existingFileIndex, err := readFileIndex(resolvedPath)
+	existingFileIndex, err := ReadFileIndex(ret.ResolvedPath)
 	if err != nil {
-		return filesChanged, filesDeleted, err
+		return ret, err
 	}
 
-	newFileMap := make(map[string]FileData)
+	ret.NewFileMap = make(map[string]FileData)
+	walk := func(walkFnPath string, fi os.FileInfo, err error) error {
+
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+
+			// if folder is the root folder, don't add it
+			if walkFnPath == directory {
+				return nil
+			}
+
+			match, err := IsGlobExpMatch(walkFnPath, ignoreRules)
+			if err != nil {
+				return err
+			}
+			// the folder matches a glob rule and thus should be skipped
+			if match {
+				return filepath.SkipDir
+			}
+
+			if fi.Name() == fileIndexDirectory || fi.Name() == ".git" {
+				klog.V(4).Info(".odo or .git directory detected, skipping it")
+				return filepath.SkipDir
+			}
+		}
+
+		relativeFilename, err := CalculateFileDataKeyFromPath(walkFnPath, directory)
+		if err != nil {
+			return err
+		}
+
+		if _, ok := existingFileIndex.Files[relativeFilename]; !ok {
+			ret.FilesChanged = append(ret.FilesChanged, walkFnPath)
+			klog.V(4).Infof("file added: %s", walkFnPath)
+		} else if !fi.ModTime().Equal(existingFileIndex.Files[relativeFilename].LastModifiedDate) {
+			ret.FilesChanged = append(ret.FilesChanged, walkFnPath)
+			klog.V(4).Infof("last modified date changed: %s", walkFnPath)
+		} else if fi.Size() != existingFileIndex.Files[relativeFilename].Size {
+			ret.FilesChanged = append(ret.FilesChanged, walkFnPath)
+			klog.V(4).Infof("size changed: %s", walkFnPath)
+		}
+
+		ret.NewFileMap[relativeFilename] = FileData{
+			Size:             fi.Size(),
+			LastModifiedDate: fi.ModTime(),
+		}
+		return nil
+	}
+
+	err = filepath.Walk(directory, walk)
+	if err != nil {
+		return ret, err
+	}
+
+	// find files which are deleted/renamed
+	for fileName := range existingFileIndex.Files {
+		if _, ok := ret.NewFileMap[fileName]; !ok {
+			klog.V(4).Infof("Deleting file: %s", fileName)
+
+			// Return the *absolute* path to the file)
+			fileAbsolutePath, err := GetAbsPath(filepath.Join(directory, fileName))
+			if err != nil {
+				return ret, errors.Wrapf(err, "unable to retrieve absolute path of file %s", fileName)
+			}
+			ret.FilesDeleted = append(ret.FilesDeleted, fileAbsolutePath)
+		}
+	}
+
+	return ret, nil
+}
+
+// DeployRunIndexer walks the given directory and returns all of the files that are found, that don't match the ignore criteria
+func DeployRunIndexer(directory string, ignoreRules []string) (files []string, err error) {
+	directory = filepath.FromSlash(directory)
+
+	// check for .gitignore file and add odo-file-index.json to .gitignore
+	gitIgnoreFile, err := CheckGitIgnoreFile(directory)
+	if err != nil {
+		return files, err
+	}
+
+	// add odo-file-index.json path to .gitignore
+	err = AddOdoFileIndex(gitIgnoreFile)
+	if err != nil {
+		return files, err
+	}
+
+	// Create a function to be passed as a parameter to filepath.Walk
 	walk := func(fn string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -189,68 +287,53 @@ func RunIndexer(directory string, ignoreRules []string) (filesChanged []string, 
 			}
 		}
 
-		relativeFilename, err := filepath.Rel(directory, fn)
-		if err != nil {
-			return err
-		}
-
-		// Use "ToSlash" to always store the index relative filename in ONE way to be compatible
-		// accross multiple platforms
-		relativeFilename = filepath.ToSlash(relativeFilename)
-
-		if _, ok := existingFileIndex.Files[relativeFilename]; !ok {
-			filesChanged = append(filesChanged, fn)
-			klog.V(4).Infof("file added: %s", fn)
-		} else if !fi.ModTime().Equal(existingFileIndex.Files[relativeFilename].LastModifiedDate) {
-			filesChanged = append(filesChanged, fn)
-			klog.V(4).Infof("last modified date changed: %s", fn)
-		} else if fi.Size() != existingFileIndex.Files[relativeFilename].Size {
-			filesChanged = append(filesChanged, fn)
-			klog.V(4).Infof("size changed: %s", fn)
-		}
-
-		newFileMap[relativeFilename] = FileData{
-			Size:             fi.Size(),
-			LastModifiedDate: fi.ModTime(),
-		}
+		files = append(files, fn)
 		return nil
 	}
 
 	err = filepath.Walk(directory, walk)
 	if err != nil {
-		return filesChanged, filesDeleted, err
+		return files, err
 	}
 
-	// find files which are deleted/renamed
-	for fileName := range existingFileIndex.Files {
-		if _, ok := newFileMap[fileName]; !ok {
-			klog.V(4).Infof("Deleting file: %s", fileName)
-
-			// Return the *absolute* path to the file)
-			fileAbsolutePath, err := GetAbsPath(filepath.Join(directory, fileName))
-			if err != nil {
-				return filesChanged, filesDeleted, errors.Wrapf(err, "unable to retrieve absolute path of file %s", fileName)
-			}
-			filesDeleted = append(filesDeleted, fileAbsolutePath)
-		}
-
-	}
-
-	// if there are added/deleted/modified/renamed files or folders, write it to the odo index file
-	if len(filesChanged) > 0 || len(filesDeleted) > 0 {
-		newfi := NewFileIndex()
-		newfi.Files = newFileMap
-		err = write(resolvedPath, newfi)
-		if err != nil {
-			return filesChanged, filesDeleted, err
-		}
-	}
-
-	return filesChanged, filesDeleted, nil
+	return files, nil
 }
 
-// writes the map of walked files and info about them, in a file
-// filepath is the location of the file to which it is supposed to be written
+// CalculateFileDataKeyFromPath converts an absolute path to relative (and converts to OS-specific paths) for use
+// as a map key in IndexerRet and FileIndex
+func CalculateFileDataKeyFromPath(absolutePath string, rootDirectory string) (string, error) {
+
+	rootDirectory = filepath.FromSlash(rootDirectory)
+
+	relativeFilename, err := filepath.Rel(rootDirectory, absolutePath)
+	if err != nil {
+		return "", err
+	}
+
+	return relativeFilename, nil
+}
+
+// GenerateNewFileDataEntry creates a new FileData entry for use by IndexerRet and/or FileIndex
+func GenerateNewFileDataEntry(absolutePath string, rootDirectory string) (string, *FileData, error) {
+
+	relativeFilename, err := CalculateFileDataKeyFromPath(absolutePath, rootDirectory)
+	if err != nil {
+		return "", nil, err
+	}
+
+	fi, err := os.Stat(absolutePath)
+
+	if err != nil {
+		return "", nil, err
+	}
+	return relativeFilename, &FileData{
+		Size:             fi.Size(),
+		LastModifiedDate: fi.ModTime(),
+	}, nil
+}
+
+// write writes the map of walked files and info about them, in a file
+// filePath is the location of the file to which it is supposed to be written
 func write(filePath string, fi *FileIndex) error {
 	jsonData, err := json.Marshal(fi)
 	if err != nil {
@@ -258,4 +341,14 @@ func write(filePath string, fi *FileIndex) error {
 	}
 	// 0600 is the mask used when a file is created using os.Create hence defaulting
 	return ioutil.WriteFile(filePath, jsonData, 0600)
+}
+
+// WriteFile writes a file map to a file, the file map is given by
+// newFileMap param and the file location is resolvedPath param
+func WriteFile(newFileMap map[string]FileData, resolvedPath string) error {
+	newfi := NewFileIndex()
+	newfi.Files = newFileMap
+	err := write(resolvedPath, newfi)
+
+	return err
 }

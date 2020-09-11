@@ -40,14 +40,42 @@ var _ = Describe("odo project command tests", func() {
 			Expect(output).To(ContainSubstring("Specify output format, supported format: json"))
 		})
 
+		It("should be able to get project", func() {
+			projectGetJSON := helper.CmdShouldPass("odo", "project", "get", "-o", "json")
+			getOutputJSON, err := helper.Unindented(projectGetJSON)
+			Expect(err).Should(BeNil())
+			expectedJSON, err := helper.Unindented(`{"kind":"Project","apiVersion":"odo.dev/v1alpha1","metadata":{"name":"` + project + `","namespace":"` + project + `","creationTimestamp":null},"spec":{},"status":{"active":true}}`)
+			Expect(err).Should(BeNil())
+			Expect(getOutputJSON).Should(MatchJSON(expectedJSON))
+		})
+
 	})
 
 	Context("when running help for project command", func() {
 		It("should display the help", func() {
-			appHelp := helper.CmdShouldPass("odo", "project", "-h")
-			Expect(appHelp).To(ContainSubstring("Perform project operations"))
+			projectHelp := helper.CmdShouldPass("odo", "project", "-h")
+			Expect(projectHelp).To(ContainSubstring("Perform project operations"))
 		})
 	})
+
+	Context("when running get command with -q flag", func() {
+		It("should display only the project name", func() {
+			projectName := helper.CmdShouldPass("odo", "project", "get", "-q")
+			Expect(projectName).Should(Equal(project))
+		})
+	})
+
+	// Uncomment via https://github.com/openshift/odo/issues/2117 fix
+	// Context("odo machine readable output on empty project", func() {
+	// 	It("should be able to list current project", func() {
+	// 		projectListJSON := helper.CmdShouldPass("odo", "project", "list", "-o", "json")
+	// 		listOutputJSON, err := helper.Unindented(projectListJSON)
+	// 		Expect(err).Should(BeNil())
+	// 		partOfProjectListJSON, err := helper.Unindented(`{"kind":"Project","apiVersion":"odo.dev/v1alpha1","metadata":{"name":"` + project + `","namespace":"` + project + `","creationTimestamp":null},"spec":{},"status":{"active":true}}`)
+	// 		Expect(err).Should(BeNil())
+	// 		Expect(listOutputJSON).To(ContainSubstring(partOfProjectListJSON))
+	// 	})
+	// })
 
 	Context("Should be able to delete a project with --wait", func() {
 		var projectName string

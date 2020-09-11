@@ -1,13 +1,14 @@
 schemaVersion: 2.0.0
 metadata:
-  name: test-devfile
-projects:
+  name: nodejs
+starterProjects:
   - name: nodejs-starter
     git:
-      location: "https://github.com/odo-devfiles/nodejs-ex.git"
+      remotes:
+        origin: "https://github.com/odo-devfiles/nodejs-ex.git"
 components:
-  - container:
-      name: runtime
+  - name: runtime
+    container:
       image: registry.access.redhat.com/ubi8/nodejs-12:1-36
       memoryLimit: 1024Mi
       env:
@@ -15,17 +16,14 @@ components:
           value: "bar"
       endpoints:
         - name: "3000/tcp"
-          configuration:
-            protocol: tcp
-            scheme: http
           targetPort: 3000
       mountSources: true
 commands:
-  - exec:
-      id: devrun
+  - id: devrun
+    exec:
       component: runtime
       commandLine: "npm install && npm start"
-      workingDir: ${CHE_PROJECTS_ROOT}/nodejs-starter
+      workingDir: ${PROJECTS_ROOT}
       group:
         kind: run
         isDefault: true

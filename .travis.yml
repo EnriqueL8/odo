@@ -9,11 +9,13 @@ jobs:
     - &base-test
       stage: test
       go_import_path: github.com/openshift/odo
-      go: "1.12.x"
+      go: "1.13.x"
       install:
         - make goget-tools
       script:
         - lsb_release -a
+        - free -m
+        - dmesg
         - export PATH="$PATH:$GOPATH/bin"
         - make bin
         - make validate
@@ -31,7 +33,7 @@ jobs:
       init:
       - git config --system core.longpaths true
       go_import_path: github.com/openshift/odo
-      go: "1.12.x"
+      go: "1.13.x"
       install:
         - systeminfo.exe | grep '^OS'
         - choco install make
@@ -50,7 +52,7 @@ jobs:
       os:
         - osx
       go_import_path: github.com/openshift/odo
-      go: "1.12.x"
+      go: "1.13.x"
       install:
         - make goget-tools
       script:
@@ -63,30 +65,31 @@ jobs:
 
     - <<: *base-test
       stage: test
-      name: "generic, login and component command integration tests"
+      name: "generic, login, component command and plugin handler integration tests"
       script:
         - ./scripts/oc-cluster.sh
+        - make configure-supported-311-is
         - make bin
         - sudo cp odo /usr/bin
         - odo login -u developer
         - travis_wait make test-generic
         - travis_wait make test-cmd-login-logout
         - travis_wait make test-cmd-cmp
+        - travis_wait make test-plugin-handler
         - odo logout
 
     - <<: *base-test
       stage: test
-      name: "preference, config, url and debug command integration tests"
+      name: "preference, config, component sub-commands and debug command integration tests"
       script:
         - ./scripts/oc-cluster.sh
+        - make configure-supported-311-is
         - make bin
         - sudo cp odo /usr/bin
         - odo login -u developer
         - travis_wait make test-cmd-pref-config
-        - travis_wait make test-cmd-url
-        - travis_wait make test-cmd-devfile-url
+        - travis_wait make test-cmd-cmp-sub
         - travis_wait make test-cmd-debug
-        - travis_wait make test-cmd-devfile-debug
         - odo logout
 
     # Run service-catalog e2e tests
@@ -95,19 +98,20 @@ jobs:
       name: "service, link and component sub-commands command integration tests"
       script:
         - ./scripts/oc-cluster.sh service-catalog
+        - make configure-supported-311-is
         - make bin
         - sudo cp odo /usr/bin
         - odo login -u developer
         - travis_wait make test-cmd-service
         - travis_wait make test-cmd-link-unlink
-        - travis_wait make test-cmd-cmp-sub
         - odo logout
 
     - <<: *base-test
       stage: test
-      name: "watch, storage, app, project and push command integration tests"
+      name: "watch, storage, app, project, URL and push command integration tests"
       script:
         - ./scripts/oc-cluster.sh
+        - make configure-supported-311-is
         - make bin
         - sudo cp odo /usr/bin
         - odo login -u developer
@@ -116,6 +120,7 @@ jobs:
         - travis_wait make test-cmd-app
         - travis_wait make test-cmd-push
         - travis_wait make test-cmd-project
+        - travis_wait make test-cmd-url
         - odo logout
 
     - <<: *base-test
@@ -124,12 +129,17 @@ jobs:
       # scenario of docker devfile url testing needs only Kube config file. So the test has been
       # added here just to make sure docker devfile url command test gets a proper kube config file.
       # without creating a separate OpenShift cluster.
-      name: "devfile catalog, create, push, delete, registry and docker devfile url command integration tests"
+      name: "devfile catalog, create, push, watch, delete, registry, exec, test, env, config, debug and log command integration tests"
       script:
         - ./scripts/oc-cluster.sh
+        - make configure-supported-311-is
+        - free -m
+        - dmesg
         - make bin
         - sudo cp odo /usr/bin
-        - travis_wait make test-cmd-docker-devfile-url-pushtarget
+        # Commenting out the docker test target (though test-cmd-docker-devfile-url-pushtarget is not broken)
+        # to avoid regression failure due to https://github.com/openshift/odo/issues/3714
+        # - travis_wait make test-cmd-docker-devfile-url-pushtarget
         # These tests need cluster login as they will be interacting with a Kube environment
         - odo login -u developer
         - travis_wait make test-cmd-devfile-catalog
@@ -137,7 +147,15 @@ jobs:
         - travis_wait make test-cmd-devfile-push
         - travis_wait make test-cmd-devfile-watch
         - travis_wait make test-cmd-devfile-delete
+        - travis_wait make test-cmd-devfile-deploy
+        - travis_wait make test-cmd-devfile-deploy-delete
         - travis_wait make test-cmd-devfile-registry
+        - travis_wait make test-cmd-devfile-test
+        - travis_wait make test-cmd-devfile-log
+        - travis_wait make test-cmd-devfile-exec
+        - travis_wait make test-cmd-devfile-env
+        - travis_wait make test-cmd-devfile-config
+        - travis_wait 60 make test-integration-devfile
         - odo logout
 
     - <<: *base-test
@@ -145,6 +163,7 @@ jobs:
       name: "core beta, java, source e2e tests"
       script:
         - ./scripts/oc-cluster.sh
+        - make configure-supported-311-is
         - make bin
         - sudo cp odo /usr/bin
         - odo login -u developer
@@ -154,22 +173,25 @@ jobs:
         - travis_wait make test-e2e-images
         - odo logout
     
-    - <<: *base-test
-      stage: test
-      name: "docker devfile push, watch, catalog and delete command integration tests"
-      script:
-        - make bin
-        - sudo cp odo /usr/bin
-        - travis_wait make test-cmd-docker-devfile-push
-        - travis_wait make test-cmd-docker-devfile-watch
-        - travis_wait make test-cmd-docker-devfile-catalog
-        - travis_wait make test-cmd-docker-devfile-delete
-        - travis_wait make test-cmd-docker-devfile-url
+    # Fix https://github.com/openshift/odo/issues/3714 to uncomment tests
+    # - <<: *base-test
+    #   stage: test
+    #   name: "docker devfile push, watch, url, test, catalog, exec and delete command integration tests"
+    #   script:
+    #     - make bin
+    #     - sudo cp odo /usr/bin
+    #     - travis_wait make test-cmd-docker-devfile-push
+    #     - travis_wait make test-cmd-docker-devfile-watch
+    #     - travis_wait make test-cmd-docker-devfile-catalog
+    #     - travis_wait make test-cmd-docker-devfile-delete
+    #     - travis_wait make test-cmd-docker-devfile-url
+    #     - travis_wait make test-cmd-docker-devfile-test
+    #     - travis_wait make test-cmd-docker-devfile-exec
 
     # Run devfile integration test on Kubernetes cluster    
     - <<: *base-test
       stage: test
-      name: "devfile catalog, watch, push, debug, delete and create command integration tests on kubernetes cluster"
+      name: "devfile catalog,url, watch, push, debug, delete, exec, test, log, storage and create command integration tests on kubernetes cluster"
       env:
         - MINIKUBE_WANTUPDATENOTIFICATION=false
         - MINIKUBE_WANTREPORTERRORPROMPT=false
@@ -178,23 +200,21 @@ jobs:
         - KUBECONFIG=$HOME/.kube/config
       before_script:
         # Download kubectl, a cli tool for accessing Kubernetes cluster
-        - curl -Lo kubectl https://storage.googleapis.com/kubernetes-release/release/v1.16.0/bin/linux/amd64/kubectl && chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+        - curl -Lo kubectl https://storage.googleapis.com/kubernetes-release/release/v1.16.1/bin/linux/amd64/kubectl && chmod +x kubectl && sudo mv kubectl /usr/local/bin/
         # Download minikube and set up Kubernetes single node cluster
-        - curl -Lo minikube https://storage.googleapis.com/minikube/releases/v1.4.0/minikube-linux-amd64 && chmod +x minikube && sudo mv minikube /usr/local/bin/
+        - curl -Lo minikube https://storage.googleapis.com/minikube/releases/v1.11.0/minikube-linux-amd64 && chmod +x minikube && sudo mv minikube /usr/local/bin/
         - mkdir -p $HOME/.kube $HOME/.minikube
         - touch $KUBECONFIG
-        - sudo minikube start --vm-driver=none --kubernetes-version=v1.16.0
+        - sudo minikube start --vm-driver=none --kubernetes-version=v1.16.1
         - "sudo chown -R travis: /home/travis/.minikube/"
         - sudo apt-get -qq update
         - sudo apt-get install -y socat
       script:
         - kubectl cluster-info
+        - free -m
+        - dmesg
         - make bin
         - sudo cp odo /usr/bin
         - export KUBERNETES=true
-        - travis_wait make test-cmd-devfile-catalog
-        - travis_wait make test-cmd-devfile-watch
-        - travis_wait make test-cmd-devfile-push
-        - travis_wait make test-cmd-devfile-debug
-        - travis_wait make test-cmd-devfile-delete
-        - travis_wait make test-cmd-devfile-create
+        - travis_wait make test-cmd-project
+        - travis_wait 60 make test-integration-devfile

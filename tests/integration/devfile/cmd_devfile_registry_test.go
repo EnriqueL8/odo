@@ -13,7 +13,8 @@ import (
 var _ = Describe("odo devfile registry command tests", func() {
 	var project, context, currentWorkingDirectory, originalKubeconfig string
 	const registryName string = "RegistryName"
-	const addRegistryURL string = "https://raw.githubusercontent.com/odo-devfiles/registry/master"
+	const addRegistryURL string = "https://github.com/odo-devfiles/registry"
+
 	const updateRegistryURL string = "http://www.example.com/update"
 
 	// Using program commmand according to cliRunner in devfile
@@ -24,8 +25,6 @@ var _ = Describe("odo devfile registry command tests", func() {
 		SetDefaultEventuallyTimeout(10 * time.Minute)
 		context = helper.CreateNewContext()
 		os.Setenv("GLOBALODOCONFIG", filepath.Join(context, "config.yaml"))
-		helper.CmdShouldPass("odo", "preference", "set", "Experimental", "true")
-
 		originalKubeconfig = os.Getenv("KUBECONFIG")
 		helper.LocalKubeconfigSet(context)
 		project = cliRunner.CreateRandNamespaceProject()
@@ -45,6 +44,11 @@ var _ = Describe("odo devfile registry command tests", func() {
 	Context("When executing registry list", func() {
 		It("Should list all default registries", func() {
 			output := helper.CmdShouldPass("odo", "registry", "list")
+			helper.MatchAllInOutput(output, []string{"DefaultDevfileRegistry"})
+		})
+
+		It("Should list all default registries with json", func() {
+			output := helper.CmdShouldPass("odo", "registry", "list", "-o", "json")
 			helper.MatchAllInOutput(output, []string{"DefaultDevfileRegistry"})
 		})
 
@@ -92,7 +96,7 @@ var _ = Describe("odo devfile registry command tests", func() {
 		It("Should successfully delete the registry", func() {
 			helper.CmdShouldPass("odo", "registry", "add", registryName, addRegistryURL)
 			helper.CmdShouldPass("odo", "registry", "delete", registryName, "-f")
-			helper.CmdShouldFail("odo", "create", "maven", "--registry", registryName)
+			helper.CmdShouldFail("odo", "create", "java-maven", "--registry", registryName)
 		})
 
 	})

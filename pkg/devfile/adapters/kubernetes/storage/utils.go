@@ -2,7 +2,7 @@ package storage
 
 import (
 	"fmt"
-
+	"github.com/openshift/odo/pkg/storage/labels"
 	"github.com/pkg/errors"
 	"k8s.io/klog"
 
@@ -30,7 +30,7 @@ func CreateComponentStorage(Client *kclient.Client, storages []common.Storage, c
 		}
 
 		if len(existingPVCName) == 0 {
-			klog.V(4).Infof("Creating a PVC for %v", volumeName)
+			klog.V(2).Infof("Creating a PVC for %v", volumeName)
 			_, err := Create(Client, volumeName, volumeSize, componentName, pvcName)
 			if err != nil {
 				return errors.Wrapf(err, "Error creating PVC for "+volumeName)
@@ -45,8 +45,8 @@ func CreateComponentStorage(Client *kclient.Client, storages []common.Storage, c
 func Create(Client *kclient.Client, name, size, componentName, pvcName string) (*corev1.PersistentVolumeClaim, error) {
 
 	labels := map[string]string{
-		"component":    componentName,
-		"storage-name": name,
+		"component":                componentName,
+		labels.DevfileStorageLabel: name,
 	}
 
 	quantity, err := resource.ParseQuantity(size)
@@ -68,7 +68,7 @@ func Create(Client *kclient.Client, name, size, componentName, pvcName string) (
 	objectMeta.OwnerReferences = append(objectMeta.OwnerReferences, ownerReference)
 
 	// Create PVC
-	klog.V(4).Infof("Creating a PVC with name %v and labels %v", pvcName, labels)
+	klog.V(2).Infof("Creating a PVC with name %v and labels %v", pvcName, labels)
 	pvc, err := Client.CreatePVC(objectMeta, *pvcSpec)
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create PVC")
@@ -79,7 +79,7 @@ func Create(Client *kclient.Client, name, size, componentName, pvcName string) (
 // GeneratePVCNameFromDevfileVol generates a PVC name from the Devfile volume name and component name
 func GeneratePVCNameFromDevfileVol(volName, componentName string) (string, error) {
 
-	pvcName := fmt.Sprintf("%v-%v", volName, componentName)
+	pvcName := fmt.Sprintf("%s-%s", volName, componentName)
 	pvcName = util.TruncateString(pvcName, pvcNameMaxLen)
 	randomChars := util.GenerateRandomString(4)
 	pvcName, err := util.NamespaceOpenShiftObject(pvcName, randomChars)
@@ -93,16 +93,16 @@ func GeneratePVCNameFromDevfileVol(volName, componentName string) (string, error
 // GetExistingPVC checks if a PVC is present and return the name if it exists
 func GetExistingPVC(Client *kclient.Client, volumeName, componentName string) (string, error) {
 
-	label := "component=" + componentName + ",storage-name=" + volumeName
+	label := fmt.Sprintf("component=%s,%s=%s", componentName, labels.DevfileStorageLabel, volumeName)
 
-	klog.V(4).Infof("Checking PVC for volume %v and label %v\n", volumeName, label)
+	klog.V(2).Infof("Checking PVC for volume %v and label %v\n", volumeName, label)
 
 	PVCs, err := Client.GetPVCsFromSelector(label)
 	if err != nil {
 		return "", errors.Wrapf(err, "Unable to get PVC with selectors "+label)
 	}
 	if len(PVCs) == 1 {
-		klog.V(4).Infof("Found an existing PVC for volume %v and label %v\n", volumeName, label)
+		klog.V(2).Infof("Found an existing PVC for volume %v and label %v\n", volumeName, label)
 		existingPVC := &PVCs[0]
 		return existingPVC.Name, nil
 	} else if len(PVCs) == 0 {
@@ -111,4 +111,25 @@ func GetExistingPVC(Client *kclient.Client, volumeName, componentName string) (s
 		err = errors.New("More than 1 PVC found with the label " + label)
 		return "", err
 	}
+}
+
+// DeleteOldPVCs deletes all the old PVCs which are not in the processedVolumes map
+func DeleteOldPVCs(Client *kclient.Client, componentName string, processedVolumes map[string]bool) error {
+	label := fmt.Sprintf("component=%s", componentName)
+	PVCs, err := Client.GetPVCsFromSelector(label)
+	if err != nil {
+		return errors.Wrapf(err, "unable to get PVC with selectors "+label)
+	}
+	for _, pvc := range PVCs {
+		storageName, ok := pvc.GetLabels()[labels.DevfileStorageLabel]
+		if ok && !processedVolumes[storageName] {
+			// the pvc is not in the processedVolumes map
+			// thus deleting those PVCs
+			err := Client.DeletePVC(pvc.GetName())
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

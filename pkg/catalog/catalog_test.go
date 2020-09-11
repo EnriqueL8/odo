@@ -159,14 +159,13 @@ func TestSliceSupportedTags(t *testing.T) {
 			NonHiddenTags: []string{
 				"12", "10", "8", "6", "latest",
 			},
-			ImageStreamRef: *imageStream,
+			ImageStreamTags: (*imageStream).Spec.Tags,
 		},
 	}
 
 	supTags, unSupTags := SliceSupportedTags(img)
-
-	if !reflect.DeepEqual(supTags, []string{"12", "10", "8", "latest"}) ||
-		!reflect.DeepEqual(unSupTags, []string{"6"}) {
+	if !reflect.DeepEqual(supTags, []string{"12", "10", "latest"}) ||
+		!reflect.DeepEqual(unSupTags, []string{"8", "6"}) {
 		t.Fatal("supported or unsupported tags are not as expected")
 	}
 }
@@ -184,10 +183,10 @@ apiversion: odo.openshift.io/v1alpha1
 OdoSettings:
   Experimental: true
   RegistryList:
-  - Name: CheDevfileRegistry
-    URL: https://che-devfile-registry.openshift.io/
   - Name: DefaultDevfileRegistry
-    URL: https://github.com/elsony/devfile-registry`,
+    URL: https://github.com/elsony/devfile-registry
+  - Name: CheDevfileRegistry
+    URL: https://che-devfile-registry.openshift.io/`,
 	))
 	if err != nil {
 		t.Error(err)
@@ -199,29 +198,32 @@ OdoSettings:
 	tests := []struct {
 		name         string
 		registryName string
-		want         map[string]Registry
+		want         []Registry
 	}{
 		{
 			name:         "Case 1: Test get all devfile registries",
 			registryName: "",
-			want: map[string]Registry{
-				"CheDevfileRegistry": {
-					Name: "CheDevfileRegistry",
-					URL:  "https://che-devfile-registry.openshift.io/",
+			want: []Registry{
+				{
+					Name:   "CheDevfileRegistry",
+					URL:    "https://che-devfile-registry.openshift.io/",
+					Secure: false,
 				},
-				"DefaultDevfileRegistry": {
-					Name: "DefaultDevfileRegistry",
-					URL:  "https://github.com/elsony/devfile-registry",
+				{
+					Name:   "DefaultDevfileRegistry",
+					URL:    "https://github.com/elsony/devfile-registry",
+					Secure: false,
 				},
 			},
 		},
 		{
 			name:         "Case 2: Test get specific devfile registry",
 			registryName: "CheDevfileRegistry",
-			want: map[string]Registry{
-				"CheDevfileRegistry": {
-					Name: "CheDevfileRegistry",
-					URL:  "https://che-devfile-registry.openshift.io/",
+			want: []Registry{
+				{
+					Name:   "CheDevfileRegistry",
+					URL:    "https://che-devfile-registry.openshift.io/",
+					Secure: false,
 				},
 			},
 		},
@@ -314,8 +316,9 @@ func MockImageStream() *imagev1.ImageStream {
 	tags := map[string]string{
 		"12": "docker.io/rhscl/nodejs-12-rhel7:latest",
 		"10": "docker.io/rhscl/nodejs-10-rhel7:latest",
-		"8":  "docker.io/rhoar-nodejs/nodejs-8:latest",
+
 		// an unspported one
+		"8": "docker.io/rhoar-nodejs/nodejs-8:latest",
 		"6": "docker.io/rhoar-nodejs/nodejs-6:latest",
 	}
 

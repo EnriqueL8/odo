@@ -8,6 +8,8 @@ import (
 	"text/tabwriter"
 
 	// Third-party packages
+	"github.com/openshift/odo/pkg/log"
+	"github.com/openshift/odo/pkg/machineoutput"
 	"github.com/spf13/cobra"
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
 
@@ -55,11 +57,17 @@ func (o *ListOptions) Run() (err error) {
 	}
 
 	registryList := cfg.OdoSettings.RegistryList
-	if len(*registryList) == 0 {
+	if registryList == nil || len(*registryList) == 0 {
 		return fmt.Errorf("No devfile registries added to the configuration. Refer `odo registry add -h` to add one")
 	}
+
+	if log.IsJSON() {
+		machineoutput.OutputSuccess(machineoutput.NewRegistryListOutput(registryList))
+		return
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 5, 2, 3, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "NAME", "\t", "URL")
+	fmt.Fprintln(w, "NAME", "\t", "URL", "\t", "SECURE")
 	o.printRegistryList(w, registryList)
 	w.Flush()
 	return
@@ -70,8 +78,15 @@ func (o *ListOptions) printRegistryList(w io.Writer, registryList *[]preference.
 		return
 	}
 
-	for _, registry := range *registryList {
-		fmt.Fprintln(w, registry.Name, "\t", registry.URL)
+	regList := *registryList
+	// Loop backwards here to ensure the registry display order is correct (display latest newly added registry firstly)
+	for i := len(regList) - 1; i >= 0; i-- {
+		registry := regList[i]
+		secure := "No"
+		if registry.Secure {
+			secure = "Yes"
+		}
+		fmt.Fprintln(w, registry.Name, "\t", registry.URL, "\t", secure)
 	}
 }
 
@@ -79,11 +94,12 @@ func (o *ListOptions) printRegistryList(w io.Writer, registryList *[]preference.
 func NewCmdList(name, fullName string) *cobra.Command {
 	o := NewListOptions()
 	registryListCmd := &cobra.Command{
-		Use:     name,
-		Short:   listDesc,
-		Long:    listDesc,
-		Example: fmt.Sprintf(fmt.Sprint(listExample), fullName),
-		Args:    cobra.ExactArgs(0),
+		Use:         name,
+		Short:       listDesc,
+		Long:        listDesc,
+		Example:     fmt.Sprintf(fmt.Sprint(listExample), fullName),
+		Annotations: map[string]string{"machineoutput": "json"},
+		Args:        cobra.ExactArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
 			genericclioptions.GenericRun(o, cmd, args)
 		},

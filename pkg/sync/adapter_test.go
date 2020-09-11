@@ -14,134 +14,9 @@ import (
 	"github.com/openshift/odo/pkg/kclient"
 	"github.com/openshift/odo/pkg/lclient"
 	"github.com/openshift/odo/pkg/testingutil"
+	"github.com/openshift/odo/pkg/util"
 	"github.com/openshift/odo/tests/helper"
 )
-
-func TestGetSyncFolder(t *testing.T) {
-	projectNames := []string{"some-name", "another-name"}
-	projectRepos := []string{"https://github.com/some/repo.git", "https://github.com/another/repo.git"}
-	projectClonePath := "src/github.com/golang/example/"
-	invalidClonePaths := []string{"/var", "../var", "pkg/../../var"}
-
-	tests := []struct {
-		name     string
-		projects []versionsCommon.DevfileProject
-		want     string
-		wantErr  bool
-	}{
-		{
-			name:     "Case 1: No projects",
-			projects: []versionsCommon.DevfileProject{},
-			want:     kclient.OdoSourceVolumeMount,
-			wantErr:  false,
-		},
-		{
-			name: "Case 2: One project",
-			projects: []versionsCommon.DevfileProject{
-				{
-					Name: projectNames[0],
-					Git: &versionsCommon.Git{
-						Location: projectRepos[0],
-					},
-				},
-			},
-			want:    filepath.ToSlash(filepath.Join(kclient.OdoSourceVolumeMount, projectNames[0])),
-			wantErr: false,
-		},
-		{
-			name: "Case 3: Multiple projects",
-			projects: []versionsCommon.DevfileProject{
-				{
-					Name: projectNames[0],
-					Git: &versionsCommon.Git{
-						Location: projectRepos[0],
-					},
-				},
-				{
-					Name: projectNames[1],
-					Github: &versionsCommon.Github{
-						Location: projectRepos[1],
-					},
-				},
-				{
-					Name: projectNames[1],
-					Zip: &versionsCommon.Zip{
-						Location: projectRepos[1],
-					},
-				},
-			},
-			want:    kclient.OdoSourceVolumeMount,
-			wantErr: false,
-		},
-		{
-			name: "Case 4: Clone path set",
-			projects: []versionsCommon.DevfileProject{
-				{
-					ClonePath: projectClonePath,
-					Name:      projectNames[0],
-					Zip: &versionsCommon.Zip{
-						Location: projectRepos[0],
-					},
-				},
-			},
-			want:    filepath.ToSlash(filepath.Join(kclient.OdoSourceVolumeMount, projectClonePath)),
-			wantErr: false,
-		},
-		{
-			name: "Case 5: Invalid clone path, set with absolute path",
-			projects: []versionsCommon.DevfileProject{
-				{
-					ClonePath: invalidClonePaths[0],
-					Name:      projectNames[0],
-					Github: &versionsCommon.Github{
-						Location: projectRepos[0],
-					},
-				},
-			},
-			want:    "",
-			wantErr: true,
-		},
-		{
-			name: "Case 6: Invalid clone path, starts with ..",
-			projects: []versionsCommon.DevfileProject{
-				{
-					ClonePath: invalidClonePaths[1],
-					Name:      projectNames[0],
-					Git: &versionsCommon.Git{
-						Location: projectRepos[0],
-					},
-				},
-			},
-			want:    "",
-			wantErr: true,
-		},
-		{
-			name: "Case 7: Invalid clone path, contains ..",
-			projects: []versionsCommon.DevfileProject{
-				{
-					ClonePath: invalidClonePaths[2],
-					Name:      projectNames[0],
-					Zip: &versionsCommon.Zip{
-						Location: projectRepos[0],
-					},
-				},
-			},
-			want:    "",
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		syncFolder, err := getSyncFolder(tt.projects)
-
-		if !tt.wantErr == (err != nil) {
-			t.Errorf("expected %v, actual %v", tt.wantErr, err)
-		}
-
-		if syncFolder != tt.want {
-			t.Errorf("expected %s, actual %s", tt.want, syncFolder)
-		}
-	}
-}
 
 func TestGetCmdToCreateSyncFolder(t *testing.T) {
 	tests := []struct {
@@ -305,7 +180,7 @@ func TestSyncFiles(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := parser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: []versionsCommon.DevfileComponent{},
 				},
 			}
@@ -421,11 +296,24 @@ func TestPushLocal(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:        "Case 6: Source mapping folder set",
+			client:      fakeClient,
+			path:        directory,
+			files:       []string{},
+			delFiles:    []string{},
+			isForcePush: false,
+			compInfo: common.ComponentInfo{
+				ContainerName: "abcd",
+				SourceMount:   "/some/path",
+			},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			devObj := parser.DevfileObj{
-				Data: testingutil.TestDevfileData{
+				Data: &testingutil.TestDevfileData{
 					Components: []versionsCommon.DevfileComponent{},
 				},
 			}
@@ -448,5 +336,119 @@ func TestPushLocal(t *testing.T) {
 	err = os.RemoveAll(directory)
 	if err != nil {
 		t.Errorf("TestPushLocal error: error deleting the temp dir %s", directory)
+	}
+}
+
+func TestUpdateIndexWithWatchChanges(t *testing.T) {
+
+	tests := []struct {
+		name                 string
+		initialFilesToCreate []string
+		watchDeletedFiles    []string
+		watchAddedFiles      []string
+		expectedFilesInIndex []string
+	}{
+		{
+			name:                 "Case 1 - Watch file deleted should remove file from index",
+			initialFilesToCreate: []string{"file1", "file2"},
+			watchDeletedFiles:    []string{"file1"},
+			expectedFilesInIndex: []string{"file2"},
+		},
+		{
+			name:                 "Case 2 - Watch file added should add file to index",
+			initialFilesToCreate: []string{"file1"},
+			watchAddedFiles:      []string{"file2"},
+			expectedFilesInIndex: []string{"file1", "file2"},
+		},
+		{
+			name:                 "Case 3 - No watch changes should mean no index changes",
+			initialFilesToCreate: []string{"file1"},
+			expectedFilesInIndex: []string{"file1"},
+		},
+	}
+	for _, tt := range tests {
+
+		// create a temp dir for the fake component
+		directory, err := ioutil.TempDir("", "")
+		if err != nil {
+			t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: error creating temporary directory for the indexer: %v", err)
+		}
+
+		fileIndexPath, err := util.ResolveIndexFilePath(directory)
+		if err != nil {
+			t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to resolve index file path: %v", err)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fileIndexPath), 0750); err != nil {
+			t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to create directories for %s: %v", fileIndexPath, err)
+		}
+
+		t.Run(tt.name, func(t *testing.T) {
+
+			indexData := map[string]util.FileData{}
+
+			// Create initial files
+			for _, fileToCreate := range tt.initialFilesToCreate {
+				filePath := filepath.Join(directory, fileToCreate)
+
+				if err := ioutil.WriteFile(filePath, []byte("non-empty-string"), 0644); err != nil {
+					t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to write to index file path: %v", err)
+				}
+
+				key, fileDatum, err := util.GenerateNewFileDataEntry(filePath, directory)
+				if err != nil {
+					t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to generate new file: %v", err)
+				}
+				indexData[key] = *fileDatum
+			}
+
+			// Write the index based on those files
+			if err := util.WriteFile(indexData, fileIndexPath); err != nil {
+				t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to write index file: %v", err)
+			}
+
+			pushParams := common.PushParameters{
+				Path: directory,
+			}
+
+			// Add deleted files to pushParams (also delete the files)
+			for _, deletedFile := range tt.watchDeletedFiles {
+				deletedFilePath := filepath.Join(directory, deletedFile)
+				pushParams.WatchDeletedFiles = append(pushParams.WatchDeletedFiles, deletedFilePath)
+
+				if err := os.Remove(deletedFilePath); err != nil {
+					t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to delete file %s %v", deletedFilePath, err)
+				}
+			}
+
+			// Add added files to pushParams (also create the files)
+			for _, addedFile := range tt.watchAddedFiles {
+				addedFilePath := filepath.Join(directory, addedFile)
+				pushParams.WatchFiles = append(pushParams.WatchFiles, addedFilePath)
+
+				if err := ioutil.WriteFile(addedFilePath, []byte("non-empty-string"), 0644); err != nil {
+					t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: unable to write to index file path: %v", err)
+				}
+			}
+
+			if err := updateIndexWithWatchChanges(pushParams); err != nil {
+				t.Fatalf("TestUpdateIndexWithWatchChangesLocal: unexpected error: %v", err)
+			}
+
+			postFileIndex, err := util.ReadFileIndex(fileIndexPath)
+			if err != nil || postFileIndex == nil {
+				t.Fatalf("TestUpdateIndexWithWatchChangesLocal error: read new file index: %v", err)
+			}
+
+			// Locate expected files
+			if len(postFileIndex.Files) != len(tt.expectedFilesInIndex) {
+				t.Fatalf("Mismatch between number expected files and actual files in index, post-index: %v   expected: %v", postFileIndex.Files, tt.expectedFilesInIndex)
+			}
+			for _, expectedFile := range tt.expectedFilesInIndex {
+				if _, exists := postFileIndex.Files[expectedFile]; !exists {
+					t.Fatalf("Unable to find '%s' in post index file, %v", expectedFile, postFileIndex.Files)
+				}
+			}
+		})
 	}
 }

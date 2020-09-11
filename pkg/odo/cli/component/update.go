@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/openshift/odo/pkg/odo/genericclioptions"
 	odoutil "github.com/openshift/odo/pkg/odo/util"
 	"github.com/openshift/odo/pkg/odo/util/completion"
+	"github.com/openshift/odo/pkg/util"
 
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
 )
@@ -32,17 +34,33 @@ type UpdateOptions struct {
 	ref    string
 
 	*CommonPushOptions
+
+	// devfile path
+	devfilePath string
 }
 
 var updateCmdExample = ktemplates.Examples(`  # Change the source code path of currently active component to local with source in ./frontend directory
 	  %[1]s --local ./frontend
+
 	
 	  # Change the source code path of currently active component to git 
 	  %[1]s --git https://github.com/openshift/nodejs-ex.git
 		
 	  # Change the source code path of of currently active component to a binary named sample.war in ./downloads directory
 	  %[1]s --binary ./downloads/sample.war
-		`)
+
+	`)
+
+const (
+	descDeprecationWarning = "WARNING: 'odo update' command will be removed in the future odo version."
+
+	deprecationWarning = `WARNING: 'odo update' command will be removed in the future odo version.
+	     You should be using 'odo config' command instead.
+	     example:
+		odo config set SourceType git
+		odo config set SourceLocation https://github.com/example/example`
+)
+const devfileErrorString string = "'odo update' command is not available for Devfile based components."
 
 // NewUpdateOptions returns new instance of UpdateOptions
 func NewUpdateOptions() *UpdateOptions {
@@ -57,6 +75,13 @@ func NewUpdateOptions() *UpdateOptions {
 
 // Complete completes update args
 func (uo *UpdateOptions) Complete(name string, cmd *cobra.Command, args []string) (err error) {
+	uo.devfilePath = filepath.Join(uo.componentContext, DevfilePath)
+
+	if util.CheckPathExists(uo.devfilePath) {
+		// Configure the devfile context
+		uo.Context = genericclioptions.NewDevfileContext(cmd)
+		return
+	}
 	uo.Context = genericclioptions.NewContext(cmd)
 	uo.LocalConfigInfo, err = config.NewLocalConfigInfo(uo.componentContext)
 	if err != nil {
@@ -68,6 +93,11 @@ func (uo *UpdateOptions) Complete(name string, cmd *cobra.Command, args []string
 
 // Validate validates the update parameters
 func (uo *UpdateOptions) Validate() (err error) {
+
+	// if experimental mode is enabled and devfile is present
+	if util.CheckPathExists(uo.devfilePath) {
+		return nil
+	}
 
 	uo.doesComponentExist, err = component.Exists(uo.Context.Client, uo.LocalConfigInfo.GetName(), uo.LocalConfigInfo.GetApplication())
 	if err != nil {
@@ -137,6 +167,14 @@ func (uo *UpdateOptions) Validate() (err error) {
 // Run has the logic to perform the required actions as part of command
 func (uo *UpdateOptions) Run() (err error) {
 
+	// if devfile is present
+	if util.CheckPathExists(uo.devfilePath) {
+		return errors.New(devfileErrorString)
+	}
+
+	yellow := color.New(color.FgYellow).SprintFunc()
+	log.Warning(yellow(deprecationWarning))
+
 	compSettings := uo.LocalConfigInfo.GetComponentSettings()
 	compSettings.SourceLocation = &uo.sourcePath
 	compSettings.SourceType = &uo.sourceType
@@ -166,7 +204,7 @@ func NewCmdUpdate(name, fullName string) *cobra.Command {
 		Use:     name,
 		Args:    cobra.MaximumNArgs(0),
 		Short:   "Update the source code path of a component",
-		Long:    "Update the source code path of a component",
+		Long:    fmt.Sprint("Update the source code path of a component\n", descDeprecationWarning),
 		Example: fmt.Sprintf(updateCmdExample, fullName),
 		Run: func(cmd *cobra.Command, args []string) {
 			genericclioptions.GenericRun(uo, cmd, args)

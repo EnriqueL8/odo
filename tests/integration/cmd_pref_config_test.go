@@ -50,7 +50,7 @@ var _ = Describe("odo preference and config command tests", func() {
 	Context("when running help for config command", func() {
 		It("should display the help", func() {
 			appHelp := helper.CmdShouldPass("odo", "config", "-h")
-			Expect(appHelp).To(ContainSubstring("Modifies odo specific configuration settings within the config file"))
+			Expect(appHelp).To(ContainSubstring("Modifies odo specific configuration settings within the devfile or config file"))
 		})
 	})
 
@@ -76,6 +76,14 @@ var _ = Describe("odo preference and config command tests", func() {
 	})
 
 	Context("When configuring global config values", func() {
+		JustBeforeEach(func() {
+			context = helper.CreateNewContext()
+			os.Setenv("GLOBALODOCONFIG", filepath.Join(context, "preference.yaml"))
+		})
+		JustAfterEach(func() {
+			helper.DeleteDir(context)
+			os.Unsetenv("GLOBALODOCONFIG")
+		})
 		It("should successfully updated", func() {
 			helper.CmdShouldPass("odo", "preference", "set", "updatenotification", "false")
 			helper.CmdShouldPass("odo", "preference", "set", "timeout", "5")
@@ -103,6 +111,15 @@ var _ = Describe("odo preference and config command tests", func() {
 			helper.CmdShouldFail("odo", "preference", "set", "-f", "experimental", "invalid-value")
 			helper.CmdShouldFail("odo", "preference", "set", "-f", "updatenotification", "invalid-value")
 		})
+
+		It("should show json output", func() {
+			prefJSONOutput, err := helper.Unindented(helper.CmdShouldPass("odo", "preference", "view", "-o", "json"))
+			Expect(err).Should(BeNil())
+			expected, err := helper.Unindented(`{"kind":"PreferenceList","apiVersion":"odo.dev/v1alpha1","items":[{"Name":"UpdateNotification","Value":null,"Default":true,"Type":"bool","Description":"Flag to control if an update notification is shown or not (Default: true)"},{"Name":"NamePrefix","Value":null,"Default":"","Type":"string","Description":"Use this value to set a default name prefix (Default: current directory name)"},{"Name":"Timeout","Value":null,"Default":1,"Type":"int","Description":"Timeout (in seconds) for OpenShift server connection check (Default: 1)"},{"Name":"BuildTimeout","Value":null,"Default":300,"Type":"int","Description":"BuildTimeout (in seconds) for waiting for a build of the git component to complete (Default: 300)"},{"Name":"PushTimeout","Value":null,"Default":240,"Type":"int","Description":"PushTimeout (in seconds) for waiting for a Pod to come up (Default: 240)"},{"Name":"Experimental","Value":null,"Default":false,"Type":"bool","Description":"Set this value to true to expose features in development/experimental mode"},{"Name":"PushTarget","Value":null,"Default":"kube","Type":"string","Description":"Set this value to 'kube' or 'docker' to tell odo where to push applications to. (Default: kube)"}]}`)
+			Expect(err).Should(BeNil())
+			Expect(prefJSONOutput).Should(MatchJSON(expected))
+		})
+
 	})
 
 	Context("when creating odo local config in the same config dir", func() {
@@ -173,7 +190,7 @@ var _ = Describe("odo preference and config command tests", func() {
 					paramValue: "https://github.com/sclorg/nodejs-ex",
 				},
 			}
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project)
 			for _, testCase := range cases {
 				helper.CmdShouldPass("odo", "config", "set", testCase.paramName, testCase.paramValue, "-f")
 				setValue := helper.GetConfigValue(testCase.paramName)
@@ -252,7 +269,7 @@ var _ = Describe("odo preference and config command tests", func() {
 					paramValue: "https://github.com/sclorg/nodejs-ex",
 				},
 			}
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project, "--context", context)
 			for _, testCase := range cases {
 
 				helper.CmdShouldPass("odo", "config", "set", "-f", "--context", context, testCase.paramName, testCase.paramValue)
@@ -276,7 +293,7 @@ var _ = Describe("odo preference and config command tests", func() {
 			helper.DeleteDir(context)
 		})
 		It("should set and unset env variables", func() {
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project, "--context", context)
 			helper.CmdShouldPass("odo", "config", "set", "--env", "PORT=4000", "--env", "PORT=1234", "--context", context)
 			configPort := helper.GetConfigValueWithContext("PORT", context)
 			Expect(configPort).To(ContainSubstring("1234"))
@@ -289,7 +306,7 @@ var _ = Describe("odo preference and config command tests", func() {
 			helper.DontMatchAllInOutput(configValue, []string{"PORT", "SECRET_KEY"})
 		})
 		It("should check for existence of environment variable in config before unsetting it", func() {
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project, "--context", context)
 			helper.CmdShouldPass("odo", "config", "set", "--env", "PORT=4000", "--env", "PORT=1234", "--context", context)
 
 			// unset a valid env var
@@ -313,7 +330,7 @@ var _ = Describe("odo preference and config command tests", func() {
 			helper.DeleteDir(context)
 		})
 		It("should list config successfully", func() {
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project, "--context", context)
 			helper.CmdShouldPass("odo", "config", "set", "--env", "hello=world", "--context", context)
 			kubeconfigOld := os.Getenv("KUBECONFIG")
 			os.Setenv("KUBECONFIG", "/no/such/path")
@@ -323,7 +340,7 @@ var _ = Describe("odo preference and config command tests", func() {
 		})
 
 		It("should set config variable without logging in", func() {
-			helper.CmdShouldPass("odo", "create", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "--project", project, "--context", context)
 			kubeconfigOld := os.Getenv("KUBECONFIG")
 			os.Setenv("KUBECONFIG", "/no/such/path")
 			helper.CmdShouldPass("odo", "config", "set", "--force", "--context", context, "Name", "foobar")
@@ -349,7 +366,7 @@ var _ = Describe("odo preference and config command tests", func() {
 		It("should successfully set and unset variables", func() {
 			//set env var
 			helper.CopyExample(filepath.Join("source", "nodejs"), context)
-			helper.CmdShouldPass("odo", "create", "nodejs", "nodejs", "--project", project, "--context", context)
+			helper.CmdShouldPass("odo", "create", "--s2i", "nodejs", "nodejs", "--project", project, "--context", context)
 			helper.CmdShouldPass("odo", "config", "set", "--now", "--env", "hello=world", "--context", context)
 			//*Check config
 			configValue1 := helper.CmdShouldPass("odo", "config", "view", "--context", context)

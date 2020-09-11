@@ -81,14 +81,13 @@ func GeneratePodTemplateSpec(objectMeta metav1.ObjectMeta, containers []corev1.C
 }
 
 // GenerateDeploymentSpec creates a deployment spec
-func GenerateDeploymentSpec(podTemplateSpec corev1.PodTemplateSpec) *appsv1.DeploymentSpec {
-	labels := podTemplateSpec.ObjectMeta.Labels
+func GenerateDeploymentSpec(podTemplateSpec corev1.PodTemplateSpec, podSelectorLabels map[string]string) *appsv1.DeploymentSpec {
 	deploymentSpec := &appsv1.DeploymentSpec{
 		Strategy: appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		},
 		Selector: &metav1.LabelSelector{
-			MatchLabels: labels,
+			MatchLabels: podSelectorLabels,
 		},
 		Template: podTemplateSpec,
 	}
@@ -146,10 +145,15 @@ type IngressParameter struct {
 	IngressDomain string
 	PortNumber    intstr.IntOrString
 	TLSSecretName string
+	Path          string
 }
 
 // GenerateIngressSpec creates an ingress spec
 func GenerateIngressSpec(ingressParam IngressParameter) *extensionsv1.IngressSpec {
+	path := "/"
+	if ingressParam.Path != "" {
+		path = ingressParam.Path
+	}
 	ingressSpec := &extensionsv1.IngressSpec{
 		Rules: []extensionsv1.IngressRule{
 			{
@@ -158,7 +162,7 @@ func GenerateIngressSpec(ingressParam IngressParameter) *extensionsv1.IngressSpe
 					HTTP: &extensionsv1.HTTPIngressRuleValue{
 						Paths: []extensionsv1.HTTPIngressPath{
 							{
-								Path: "/",
+								Path: path,
 								Backend: extensionsv1.IngressBackend{
 									ServiceName: ingressParam.ServiceName,
 									ServicePort: ingressParam.PortNumber,

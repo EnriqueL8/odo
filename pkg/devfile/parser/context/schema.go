@@ -36,7 +36,7 @@ func (d *DevfileCtx) ValidateDevfileSchema() error {
 	}
 
 	if !result.Valid() {
-		errMsg := fmt.Sprintf("invalid devfile schema. errors :\n")
+		errMsg := "invalid devfile schema. errors :\n"
 		for _, desc := range result.Errors() {
 			errMsg = errMsg + fmt.Sprintf("- %s\n", desc)
 		}
@@ -44,6 +44,6 @@ func (d *DevfileCtx) ValidateDevfileSchema() error {
 	}
 
 	// Sucessful
-	klog.V(4).Info("validated devfile schema")
+	klog.V(2).Info("validated devfile schema")
 	return nil
 }

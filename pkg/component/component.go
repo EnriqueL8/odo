@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/openshift/odo/pkg/devfile/adapters/common"
 	"github.com/openshift/odo/pkg/kclient"
@@ -21,10 +22,9 @@ import (
 	"github.com/openshift/odo/pkg/catalog"
 	componentlabels "github.com/openshift/odo/pkg/component/labels"
 	"github.com/openshift/odo/pkg/config"
-	"github.com/openshift/odo/pkg/exec"
+	parsercommon "github.com/openshift/odo/pkg/devfile/parser/data/common"
 	"github.com/openshift/odo/pkg/log"
 	"github.com/openshift/odo/pkg/occlient"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/openshift/odo/pkg/odo/util/validation"
 	"github.com/openshift/odo/pkg/preference"
 	"github.com/openshift/odo/pkg/storage"
@@ -529,7 +529,29 @@ func ValidateComponentCreateRequest(client *occlient.Client, componentSettings c
 		}
 	}
 
+	if err := ensureAndLogProperResourceUsage(componentSettings.MinMemory, componentSettings.MaxMemory, "memory"); err != nil {
+		return err
+	}
+
+	if err := ensureAndLogProperResourceUsage(componentSettings.MinCPU, componentSettings.MaxCPU, "cpu"); err != nil {
+		return err
+	}
+
 	return
+}
+
+func ensureAndLogProperResourceUsage(resourceMin, resourceMax *string, resourceName string) error {
+	klog.V(4).Infof("Validating configured %v values", resourceName)
+
+	err := fmt.Errorf("`min%s` should accompany `max%s` or use `odo config set %s` to use same value for both min and max", resourceName, resourceName, resourceName)
+
+	if (resourceMin == nil) != (resourceMax == nil) {
+		return err
+	}
+	if (resourceMin != nil && *resourceMin == "") != (resourceMax != nil && *resourceMax == "") {
+		return err
+	}
+	return nil
 }
 
 // ApplyConfig applies the component config onto component dc
@@ -541,10 +563,11 @@ func ValidateComponentCreateRequest(client *occlient.Client, componentSettings c
 //	componentConfig: Component configuration
 //	envSpecificInfo: Component environment specific information, available if uses devfile
 //  cmpExist: true if components exists in the cluster
+//  endpointMap: value is devfile endpoint entry, key is the TargetPort for each enpoint entry
+//  isS2I: Legacy option. Set as true if you want to use the old S2I method as it differentiates slightly.
 // Returns:
 //	err: Errors if any else nil
-func ApplyConfig(client *occlient.Client, kClient *kclient.Client, componentConfig config.LocalConfigInfo, envSpecificInfo envinfo.EnvSpecificInfo, stdout io.Writer, cmpExist bool) (err error) {
-	isExperimentalModeEnabled := experimental.IsExperimentalModeEnabled()
+func ApplyConfig(client *occlient.Client, kClient *kclient.Client, componentConfig config.LocalConfigInfo, envSpecificInfo envinfo.EnvSpecificInfo, stdout io.Writer, cmpExist bool, containerComponents []parsercommon.DevfileComponent, isS2I bool) (err error) {
 
 	if client == nil {
 		var err error
@@ -552,10 +575,11 @@ func ApplyConfig(client *occlient.Client, kClient *kclient.Client, componentConf
 		if err != nil {
 			return err
 		}
-		client.Namespace = envSpecificInfo.GetNamespace()
+		// new client created to support route URLs for devfile components should use the same namespace as kClient's
+		client.Namespace = kClient.Namespace
 	}
 
-	if !isExperimentalModeEnabled {
+	if isS2I {
 		// if component exist then only call the update function
 		if cmpExist {
 			if err = Update(client, componentConfig, componentConfig.GetSourceLocation(), stdout); err != nil {
@@ -566,7 +590,7 @@ func ApplyConfig(client *occlient.Client, kClient *kclient.Client, componentConf
 
 	var componentName string
 	var applicationName string
-	if !isExperimentalModeEnabled || kClient == nil {
+	if isS2I || kClient == nil {
 		componentName = componentConfig.GetName()
 		applicationName = componentConfig.GetApplication()
 	} else {
@@ -580,12 +604,13 @@ func ApplyConfig(client *occlient.Client, kClient *kclient.Client, componentConf
 	}
 
 	return urlpkg.Push(client, kClient, urlpkg.PushParameters{
-		ComponentName:             componentName,
-		ApplicationName:           applicationName,
-		ConfigURLs:                componentConfig.GetURL(),
-		EnvURLS:                   envSpecificInfo.GetURL(),
-		IsRouteSupported:          isRouteSupported,
-		IsExperimentalModeEnabled: isExperimentalModeEnabled,
+		ComponentName:       componentName,
+		ApplicationName:     applicationName,
+		ConfigURLs:          componentConfig.GetURL(),
+		EnvURLS:             envSpecificInfo.GetURL(),
+		IsRouteSupported:    isRouteSupported,
+		ContainerComponents: containerComponents,
+		IsS2I:               isS2I,
 	})
 }
 
@@ -694,7 +719,7 @@ func PushLocal(client *occlient.Client, componentName string, applicationName st
 	compInfo := common.ComponentInfo{
 		PodName: pod.Name,
 	}
-	err = exec.ExecuteCommand(client, compInfo, cmdArr, show, nil, nil)
+	err = common.ExecuteCommand(client, compInfo, cmdArr, show, nil, nil)
 
 	if err != nil {
 		s.End(false)
@@ -711,6 +736,15 @@ func PushLocal(client *occlient.Client, componentName string, applicationName st
 // If 'wait' is false than this function won't return error even if build failed.
 // 'show' will determine whether or not the log will be shown to the user (while building)
 func Build(client *occlient.Client, componentName string, applicationName string, wait bool, stdout io.Writer, show bool) error {
+
+	// Try to grab the preference in order to set a timeout.. but if not, we’ll use the default.
+	buildTimeout := preference.DefaultBuildTimeout * time.Second
+	cfg, configReadErr := preference.New()
+	if configReadErr != nil {
+		klog.V(4).Info(errors.Wrap(configReadErr, "unable to read config file"))
+	} else {
+		buildTimeout = time.Duration(cfg.GetBuildTimeout()) * time.Second
+	}
 
 	// Loading spinner
 	// No loading spinner if we're showing the logging output
@@ -746,7 +780,7 @@ func Build(client *occlient.Client, componentName string, applicationName string
 
 		defer s.End(false)
 
-		if err := client.WaitForBuildToFinish(buildName, stdout); err != nil {
+		if err := client.WaitForBuildToFinish(buildName, stdout, buildTimeout); err != nil {
 			return errors.Wrapf(err, "unable to build %s, error: %s", buildName, b.String())
 		}
 		s.End(true)

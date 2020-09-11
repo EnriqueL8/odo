@@ -13,7 +13,6 @@ Odo utilizes Operators and link:https://operatorhub.io/[Operator Hub] in order t
 ==== Prerequisites
 
 * You must have cluster permissions to install an Operator on either link:https://docs.openshift.com/container-platform/4.3/operators/olm-adding-operators-to-cluster.html[OpenShift] or link:https://github.com/operator-framework/operator-lifecycle-manager/blob/master/doc/install/install.md[Kubernetes].
-* Enable experimental mode for odo. This can be done by: `odo preference set experimental true`
 
 == Creating a project
 
@@ -77,7 +76,7 @@ In this example, we will be deploying our link:https://operatorhub.io/operator/e
 +
 [source,sh]
 ----
-  $ odo service create etcdoperator.v0.9.4 --crd EtcdCluster
+  $ odo service create etcdoperator.v0.9.4/EtcdCluster
 ----
 
 . Confirm the Operator backed service was deployed:
@@ -105,7 +104,7 @@ Deploying via YAML is a **temporary** feature as we add support for link:https:/
 +
 [source,shell]
 ----
-  $ odo service create etcdoperator.v0.9.4 --crd EtcdCluster --dry-run > etcd.yaml
+  $ odo service create etcdoperator.v0.9.4/EtcdCluster --dry-run > etcd.yaml
 ----
 
 . Modify the YAML file by redefining the name and size:

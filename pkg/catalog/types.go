@@ -14,8 +14,9 @@ type ComponentType struct {
 
 // Registry is the main struct of devfile registry
 type Registry struct {
-	Name string
-	URL  string
+	Name   string
+	URL    string
+	Secure bool
 }
 
 // DevfileComponentType is the main struct for devfile catalog components
@@ -44,10 +45,10 @@ type DevfileIndexEntry struct {
 
 // ComponentSpec is the spec for ComponentType
 type ComponentSpec struct {
-	AllTags        []string            `json:"allTags"`
-	NonHiddenTags  []string            `json:"nonHiddenTags"`
-	SupportedTags  []string            `json:"supportedTags"`
-	ImageStreamRef imagev1.ImageStream `json:"-"`
+	AllTags         []string               `json:"allTags"`
+	NonHiddenTags   []string               `json:"nonHiddenTags"`
+	SupportedTags   []string               `json:"supportedTags"`
+	ImageStreamTags []imagev1.TagReference `json:"imageStreamTags"`
 }
 
 // ComponentTypeList lists all the ComponentType's
@@ -59,7 +60,7 @@ type ComponentTypeList struct {
 
 // DevfileComponentTypeList lists all the DevfileComponentType's
 type DevfileComponentTypeList struct {
-	DevfileRegistries map[string]Registry
+	DevfileRegistries []Registry
 	Items             []DevfileComponentType
 }
 

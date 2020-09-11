@@ -2,21 +2,19 @@ package component
 
 import (
 	"fmt"
-	"github.com/openshift/odo/pkg/devfile/adapters/common"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/openshift/odo/pkg/devfile/adapters/common"
+
 	"github.com/openshift/odo/pkg/config"
+	"github.com/openshift/odo/pkg/devfile"
 	"github.com/openshift/odo/pkg/devfile/adapters"
 	"github.com/openshift/odo/pkg/devfile/adapters/kubernetes"
-	"github.com/openshift/odo/pkg/devfile/parser"
-	"github.com/openshift/odo/pkg/envinfo"
 	"github.com/openshift/odo/pkg/occlient"
 	appCmd "github.com/openshift/odo/pkg/odo/cli/application"
 	projectCmd "github.com/openshift/odo/pkg/odo/cli/project"
-	"github.com/openshift/odo/pkg/odo/util/completion"
-	"github.com/openshift/odo/pkg/odo/util/experimental"
 	"github.com/openshift/odo/pkg/odo/util/pushtarget"
 	"github.com/pkg/errors"
 	ktemplates "k8s.io/kubectl/pkg/util/templates"
@@ -34,19 +32,12 @@ import (
 // WatchRecommendedCommandName is the recommended watch command name
 const WatchRecommendedCommandName = "watch"
 
-var watchLongDesc = ktemplates.LongDesc(`Watch for changes, update component on change.`)
-var watchExampleWithComponentName = ktemplates.Examples(`  # Watch for changes in directory for current component
+var watchLongDesc = ktemplates.LongDesc(`Watch for changes, update component on change. Watch doesn't support git components.`)
+var watchExampleWithDevfile = ktemplates.Examples(`  # Watch for changes in directory for current component
 %[1]s
-
-# Watch for changes in directory for component called frontend 
-%[1]s frontend
 
 # Watch source code changes with custom devfile commands using --build-command and --run-command for experimental mode
 %[1]s --build-command="mybuild" --run-command="myrun"
-  `)
-
-var watchExample = ktemplates.Examples(`  # Watch for changes in directory for current component
-%[1]s
   `)
 
 // WatchOptions contains attributes of the watch command
@@ -60,12 +51,13 @@ type WatchOptions struct {
 	componentContext string
 	client           *occlient.Client
 
-	componentName  string
-	devfilePath    string
-	namespace      string
-	devfileHandler common.ComponentAdapter
+	componentName string
+	devfilePath   string
+	namespace     string
 
-	EnvSpecificInfo *envinfo.EnvSpecificInfo
+	// initialDevfileHandler is only used to do initial validation on the devfile.
+	// All subsequent uses of the devfile adapter are generated in regenerateAdapterAndPush.
+	initialDevfileHandler common.ComponentAdapter
 
 	// devfile commands
 	devfileInitCommand  string
@@ -85,12 +77,7 @@ func (wo *WatchOptions) Complete(name string, cmd *cobra.Command, args []string)
 	wo.devfilePath = filepath.Join(wo.componentContext, DevfilePath)
 
 	// if experimental mode is enabled and devfile is present
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(wo.devfilePath) {
-		envinfo, err := envinfo.NewEnvSpecificInfo(wo.componentContext)
-		if err != nil {
-			return errors.Wrap(err, "unable to retrieve configuration information")
-		}
-		wo.EnvSpecificInfo = envinfo
+	if util.CheckPathExists(wo.devfilePath) {
 		wo.Context = genericclioptions.NewDevfileContext(cmd)
 
 		// Set the source path to either the context or current working directory (if context not set)
@@ -106,13 +93,13 @@ func (wo *WatchOptions) Complete(name string, cmd *cobra.Command, args []string)
 		}
 
 		// Get the component name
-		wo.componentName, err = getComponentName(wo.componentContext)
+		wo.componentName = wo.EnvSpecificInfo.GetName()
 		if err != nil {
 			return err
 		}
 
 		// Parse devfile and validate
-		devObj, err := parser.ParseAndValidate(wo.devfilePath)
+		devObj, err := devfile.ParseAndValidate(wo.devfilePath)
 		if err != nil {
 			return err
 		}
@@ -127,7 +114,7 @@ func (wo *WatchOptions) Complete(name string, cmd *cobra.Command, args []string)
 		} else {
 			platformContext = nil
 		}
-		wo.devfileHandler, err = adapters.NewComponentAdapter(wo.componentName, wo.componentContext, devObj, platformContext)
+		wo.initialDevfileHandler, err = adapters.NewComponentAdapter(wo.componentName, wo.componentContext, wo.Application, devObj, platformContext)
 
 		return err
 	}
@@ -169,8 +156,11 @@ func (wo *WatchOptions) Validate() (err error) {
 	}
 
 	// if experimental mode is enabled and devfile is present, return. The rest of the validation is for non-devfile components
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(wo.devfilePath) {
-		exists := wo.devfileHandler.DoesComponentExist(wo.componentName)
+	if util.CheckPathExists(wo.devfilePath) {
+		exists, err := wo.initialDevfileHandler.DoesComponentExist(wo.componentName)
+		if err != nil {
+			return err
+		}
 		if !exists {
 			return fmt.Errorf("component does not exist. Please use `odo push` to create your component")
 		}
@@ -208,18 +198,19 @@ func (wo *WatchOptions) Validate() (err error) {
 // Run has the logic to perform the required actions as part of command
 func (wo *WatchOptions) Run() (err error) {
 	// if experimental mode is enabled and devfile is present
-	if experimental.IsExperimentalModeEnabled() && util.CheckPathExists(wo.devfilePath) {
+	if util.CheckPathExists(wo.devfilePath) {
 
 		err = watch.DevfileWatchAndPush(
 			os.Stdout,
 			watch.WatchParameters{
 				ComponentName:       wo.componentName,
+				ApplicationName:     wo.Context.Application,
 				Path:                wo.sourcePath,
 				FileIgnores:         util.GetAbsGlobExps(wo.sourcePath, wo.ignores),
 				PushDiffDelay:       wo.delay,
 				StartChan:           nil,
 				ExtChan:             make(chan bool),
-				DevfileWatchHandler: wo.devfileHandler.Push,
+				DevfileWatchHandler: wo.regenerateAdapterAndPush,
 				Show:                wo.show,
 				DevfileInitCmd:      strings.ToLower(wo.devfileInitCommand),
 				DevfileBuildCmd:     strings.ToLower(wo.devfileBuildCommand),
@@ -237,15 +228,16 @@ func (wo *WatchOptions) Run() (err error) {
 		wo.Context.Client,
 		os.Stdout,
 		watch.WatchParameters{
-			ComponentName:   wo.LocalConfigInfo.GetName(),
-			ApplicationName: wo.Context.Application,
-			Path:            wo.sourcePath,
-			FileIgnores:     util.GetAbsGlobExps(wo.sourcePath, wo.ignores),
-			PushDiffDelay:   wo.delay,
-			StartChan:       nil,
-			ExtChan:         make(chan bool),
-			WatchHandler:    component.PushLocal,
-			Show:            wo.show,
+			ComponentName:       wo.LocalConfigInfo.GetName(),
+			ApplicationName:     wo.Context.Application,
+			Path:                wo.sourcePath,
+			FileIgnores:         util.GetAbsGlobExps(wo.sourcePath, wo.ignores),
+			PushDiffDelay:       wo.delay,
+			StartChan:           nil,
+			ExtChan:             make(chan bool),
+			DevfileWatchHandler: nil,
+			WatchHandler:        component.PushLocal,
+			Show:                wo.show,
 		},
 	)
 	if err != nil {
@@ -258,20 +250,17 @@ func (wo *WatchOptions) Run() (err error) {
 func NewCmdWatch(name, fullName string) *cobra.Command {
 	wo := NewWatchOptions()
 
-	example := fmt.Sprintf(watchExample, fullName)
 	usage := name
 
-	if experimental.IsExperimentalModeEnabled() {
-		example = fmt.Sprintf(watchExampleWithComponentName, fullName)
-		usage = fmt.Sprintf("%s [component name]", name)
-	}
+	// Add information on Devfile
+	example := fmt.Sprintf(watchExampleWithDevfile, fullName)
 
 	var watchCmd = &cobra.Command{
 		Use:         usage,
-		Short:       "Watch for changes, update component on change",
+		Short:       "Watch for changes, update component on change. Watch doesn't support git components.",
 		Long:        watchLongDesc,
 		Example:     example,
-		Args:        cobra.MaximumNArgs(1),
+		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"command": "component"},
 		Run: func(cmd *cobra.Command, args []string) {
 			genericclioptions.GenericRun(wo, cmd, args)
@@ -284,12 +273,9 @@ func NewCmdWatch(name, fullName string) *cobra.Command {
 
 	watchCmd.SetUsageTemplate(odoutil.CmdUsageTemplate)
 
-	// enable devfile flag if experimental mode is enabled
-	if experimental.IsExperimentalModeEnabled() {
-		watchCmd.Flags().StringVar(&wo.devfileInitCommand, "init-command", "", "Devfile Init Command to execute")
-		watchCmd.Flags().StringVar(&wo.devfileBuildCommand, "build-command", "", "Devfile Build Command to execute")
-		watchCmd.Flags().StringVar(&wo.devfileRunCommand, "run-command", "", "Devfile Run Command to execute")
-	}
+	watchCmd.Flags().StringVar(&wo.devfileInitCommand, "init-command", "", "Devfile Init Command to execute")
+	watchCmd.Flags().StringVar(&wo.devfileBuildCommand, "build-command", "", "Devfile Build Command to execute")
+	watchCmd.Flags().StringVar(&wo.devfileRunCommand, "run-command", "", "Devfile Run Command to execute")
 
 	// Adding context flag
 	genericclioptions.AddContextFlag(watchCmd, &wo.componentContext)
@@ -300,7 +286,46 @@ func NewCmdWatch(name, fullName string) *cobra.Command {
 	//Adding `--project` flag
 	projectCmd.AddProjectFlag(watchCmd)
 
-	completion.RegisterCommandHandler(watchCmd, completion.ComponentNameCompletionHandler)
-
 	return watchCmd
+}
+
+// regenerateAdapterAndPush is used as a DevfileWatchHandler in WatchParameters; it is a wrapper around adapter.Push()
+// that first regenerates the component adapter before calling push. This ensures that it has picked up the latest
+// devfile.yaml changes
+func (wo *WatchOptions) regenerateAdapterAndPush(pushParams common.PushParameters, watchParams watch.WatchParameters) error {
+	var adapter common.ComponentAdapter
+
+	adapter, err := wo.regenerateComponentAdapterFromWatchParams(watchParams)
+	if err != nil {
+		return errors.Wrapf(err, "unable to generate component from watch parameters")
+	}
+
+	err = adapter.Push(pushParams)
+	if err != nil {
+		return errors.Wrapf(err, "watch command was unable to push component")
+	}
+
+	return err
+}
+
+// regenerateComponentAdapterFromWatchParams (re)generates a component adapter from the given watch parameters.
+func (wo *WatchOptions) regenerateComponentAdapterFromWatchParams(parameters watch.WatchParameters) (common.ComponentAdapter, error) {
+
+	// Parse devfile and validate
+	devObj, err := devfile.ParseAndValidate(wo.devfilePath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "unable to parse and validate '%s'", wo.devfilePath)
+	}
+
+	var platformContext interface{}
+	if !pushtarget.IsPushTargetDocker() {
+		platformContext = kubernetes.KubernetesContext{
+			Namespace: wo.namespace,
+		}
+	} else {
+		platformContext = nil
+	}
+
+	return adapters.NewComponentAdapter(parameters.ComponentName, parameters.Path, parameters.ApplicationName, devObj, platformContext)
+
 }
